@@ -23,6 +23,25 @@ import subprocess
 import sys
 from pathlib import Path
 
+_IS_WINDOWS = sys.platform == "win32"
+
+
+def _of_path(case_dir):
+    """Return the path string usable inside the bash script (WSL path on Windows, native on Linux)."""
+    if _IS_WINDOWS:
+        return str(case_dir).replace("C:\\", "/mnt/c/").replace("\\", "/")
+    return str(case_dir)
+
+
+def _run_of_script(script_path, case_dir, timeout=600):
+    """Run an OpenFOAM bash script via WSL (Windows) or directly (Linux)."""
+    bash_script = _of_path(script_path)
+    if _IS_WINDOWS:
+        cmd = [r"C:\Windows\system32\wsl.exe", "-d", "Ubuntu", "--", "bash", bash_script]
+    else:
+        cmd = ["bash", str(script_path)]
+    return subprocess.run(cmd, capture_output=True, timeout=timeout)
+
 
 def create_openfoam_case(mesh_result, wind_speed=20.0, wind_angle=0.0,
                          nu=1.5e-5, turbulence_intensity=0.05,
@@ -552,14 +571,12 @@ def run_openfoam(case_dir, polygon, mesh_size=0.2, far_field_factor=15,
     generate_gmsh_msh(polygon, msh_path, mesh_size, far_field_factor,
                       bl_layers=bl_layers, bl_ratio=bl_ratio)
 
-    # Convert Windows path to WSL path
-    wsl_case = str(case_dir).replace("C:\\", "/mnt/c/").replace("\\", "/")
+    of_case = _of_path(case_dir)
 
-    # Step 2-4: Run in WSL
-    print("  [2/4] Converting mesh + running simpleFoam in WSL...")
+    print("  [2/4] Converting mesh + running simpleFoam...")
     of_script = f"""#!/bin/bash
 for _of in /usr/lib/openfoam/openfoam2412/etc/bashrc /usr/lib/openfoam/openfoam2406/etc/bashrc /opt/openfoam*/etc/bashrc; do [ -f "$_of" ] && source "$_of" && break; done
-cd "{wsl_case}"
+cd "{of_case}"
 
 echo "=== gmshToFoam ==="
 gmshToFoam mesh.msh 2>&1 | tail -5
@@ -579,10 +596,9 @@ txt = re.sub(r'(frontAndBack[^{{]*{{[^}}]*type\s+)\w+', r'\g<1>empty', txt)
 with open('boundary','w') as f: f.write(txt)
 print('Boundary: section=wall, frontAndBack=empty, farfield=patch')
 " 2>&1
-cd "{wsl_case}"
+cd "{of_case}"
 
 echo "=== Starting solver ==="
-# Detect solver from controlDict (strip Windows CR)
 SOLVER=$(grep "application" system/controlDict | awk '{{print $2}}' | tr -d ';\\r\\n')
 echo "Solver: $SOLVER"
 $SOLVER 2>&1 || true
@@ -597,10 +613,7 @@ echo "=== DONE ==="
         f.write(of_script)
 
     try:
-        result = subprocess.run(
-            [r"C:\Windows\system32\wsl.exe", "-d", "Ubuntu", "--", "bash", f"{wsl_case}/run_of.sh"],
-            capture_output=True, timeout=300,
-        )
+        result = _run_of_script(script_path, case_dir, timeout=300)
         log = result.stdout.decode("utf-8", errors="replace")
         log += result.stderr.decode("utf-8", errors="replace")
         success = "=== DONE ===" in log and "FOAM FATAL" not in log
@@ -1473,11 +1486,11 @@ mergeTolerance 1e-6;
 def run_openfoam_3d_stl(case_dir, n_procs=4):
     """Run OpenFOAM with snappyHexMesh for STL-based geometry."""
     case_dir = Path(case_dir).resolve()
-    wsl_case = str(case_dir).replace("C:\\", "/mnt/c/").replace("\\", "/")
+    of_case = _of_path(case_dir)
 
     of_script = f"""#!/bin/bash
 for _of in /usr/lib/openfoam/openfoam2412/etc/bashrc /usr/lib/openfoam/openfoam2406/etc/bashrc /opt/openfoam*/etc/bashrc; do [ -f "$_of" ] && source "$_of" && break; done
-cd "{wsl_case}"
+cd "{of_case}"
 
 echo "=== blockMesh ==="
 blockMesh 2>&1 | tail -5
@@ -1497,7 +1510,7 @@ with open('boundary','w') as f: f.write(txt)
 print('Boundary patched')
 " 2>&1
 fi
-cd "{wsl_case}"
+cd "{of_case}"
 
 echo "=== simpleFoam ({n_procs} procs) ==="
 {"decomposePar 2>&1 | tail -3 && mpirun --oversubscribe -np " + str(n_procs) + " simpleFoam -parallel 2>&1 || simpleFoam 2>&1" if n_procs > 1 else "simpleFoam 2>&1"} || true
@@ -1514,10 +1527,7 @@ echo "=== DONE ==="
         f.write(of_script)
 
     try:
-        result = subprocess.run(
-            [r"C:\Windows\system32\wsl.exe", "-d", "Ubuntu", "--", "bash", f"{wsl_case}/run_snappy.sh"],
-            capture_output=True, timeout=900,
-        )
+        result = _run_of_script(script_path, case_dir, timeout=900)
         log = result.stdout.decode("utf-8", errors="replace")
         log += result.stderr.decode("utf-8", errors="replace")
         success = "=== DONE ===" in log and "FOAM FATAL" not in log
@@ -1969,13 +1979,13 @@ def run_openfoam_3d(case_dir, footprint, height, mesh_size=None,
                                        buildings=buildings)
     print(f"  Mesh: {mesh_stats['n_nodes']} nodes, {mesh_stats['n_cells']} cells")
 
-    wsl_case = str(case_dir).replace("C:\\", "/mnt/c/").replace("\\", "/")
+    of_case = _of_path(case_dir)
 
     use_parallel = n_procs > 1
-    print(f"  [2/4] Converting mesh + running simpleFoam in WSL ({n_procs} procs)...")
+    print(f"  [2/4] Converting mesh + running simpleFoam ({n_procs} procs)...")
     of_script = f"""#!/bin/bash
 for _of in /usr/lib/openfoam/openfoam2412/etc/bashrc /usr/lib/openfoam/openfoam2406/etc/bashrc /opt/openfoam*/etc/bashrc; do [ -f "$_of" ] && source "$_of" && break; done
-cd "{wsl_case}"
+cd "{of_case}"
 
 echo "=== gmshToFoam ==="
 gmshToFoam mesh.msh 2>&1 | tail -5
@@ -1999,7 +2009,7 @@ txt = re.sub(r'(building[^{{]*{{[^}}]*type\\s+)\\w+', r'\\g<1>wall', txt)
 with open('boundary','w') as f: f.write(txt)
 print('Boundary types patched')
 " 2>&1
-cd "{wsl_case}"
+cd "{of_case}"
 
 echo "=== checkMesh ==="
 checkMesh 2>&1 | grep -E "cells|faces|Maximum|Minimum|FAILED|OK|WARNING" || true
@@ -2026,10 +2036,7 @@ echo "=== DONE ==="
         f.write(of_script)
 
     try:
-        result = subprocess.run(
-            [r"C:\Windows\system32\wsl.exe", "-d", "Ubuntu", "--", "bash", f"{wsl_case}/run_of_3d.sh"],
-            capture_output=True, timeout=600,
-        )
+        result = _run_of_script(script_path, case_dir, timeout=600)
         log = result.stdout.decode("utf-8", errors="replace")
         log += result.stderr.decode("utf-8", errors="replace")
         success = "=== DONE ===" in log and "FOAM FATAL" not in log
@@ -2521,10 +2528,10 @@ seedSampleSet
         f.write(streamline_dict)
 
     # Run postProcess
-    wsl_case = str(case_dir).replace("C:\\", "/mnt/c/").replace("\\", "/")
+    of_case = _of_path(case_dir)
     script = f"""#!/bin/bash
 for _of in /usr/lib/openfoam/openfoam2412/etc/bashrc /usr/lib/openfoam/openfoam2406/etc/bashrc /opt/openfoam*/etc/bashrc; do [ -f "$_of" ] && source "$_of" && break; done
-cd "{wsl_case}"
+cd "{of_case}"
 postProcess -func streamLineDict -latestTime 2>&1 | tail -5
 echo "STREAMLINE_DONE"
 """
@@ -2533,10 +2540,7 @@ echo "STREAMLINE_DONE"
         f.write(script)
 
     try:
-        result = subprocess.run(
-            [r"C:\Windows\system32\wsl.exe", "-d", "Ubuntu", "--", "bash", f"{wsl_case}/run_streamlines.sh"],
-            capture_output=True, timeout=60,
-        )
+        result = _run_of_script(script_path, case_dir, timeout=60)
         log = result.stdout.decode("utf-8", errors="replace")
         if "STREAMLINE_DONE" not in log:
             print(f"  Streamline postProcess failed: {log[-300:]}")
