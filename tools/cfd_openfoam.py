@@ -549,7 +549,7 @@ gmsh.finalize()
 
 
 def run_openfoam(case_dir, polygon, mesh_size=0.2, far_field_factor=15,
-                 bl_layers=5, bl_ratio=1.3):
+                 bl_layers=5, bl_ratio=1.3, n_procs=1):
     """
     Run OpenFOAM simpleFoam via WSL.
 
@@ -557,14 +557,31 @@ def run_openfoam(case_dir, polygon, mesh_size=0.2, far_field_factor=15,
     1. Generate Gmsh .msh file
     2. Convert to OpenFOAM polyMesh via gmshToFoam (WSL)
     3. Fix boundary types
-    4. Run simpleFoam (WSL)
+    4. renumberMesh (bandwidth reduction) + run simpleFoam (parallel if n_procs>1)
     5. Parse force coefficients
+
+    n_procs > 1 runs decomposePar → mpirun simpleFoam -parallel → reconstructPar.
+    Only used for steady runs on large meshes (caller forces n_procs=1 for transient).
 
     Returns:
         dict with success, log, force_coefficients
     """
     case_dir = Path(case_dir).resolve()
     msh_path = str(case_dir / "mesh.msh")
+
+    # decomposeParDict for parallel runs (scotch auto-partitions)
+    if n_procs > 1:
+        _write_of_file(case_dir / "system" / "decomposeParDict", None, None, f"""
+FoamFile
+{{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      decomposeParDict;
+}}
+numberOfSubdomains {n_procs};
+method          scotch;
+""")
 
     # Step 1: Generate Gmsh .msh (with boundary layer)
     print(f"  [1/4] Generating Gmsh mesh (BL: {bl_layers} layers, ratio {bl_ratio})...")
@@ -573,7 +590,17 @@ def run_openfoam(case_dir, polygon, mesh_size=0.2, far_field_factor=15,
 
     of_case = _of_path(case_dir)
 
-    print("  [2/4] Converting mesh + running simpleFoam...")
+    print(f"  [2/4] Converting mesh + running simpleFoam ({n_procs} procs)...")
+    if n_procs > 1:
+        run_block = (
+            f'echo "=== decomposePar ({n_procs} domains) ==="\n'
+            f'decomposePar -force 2>&1 | tail -3\n'
+            f'mpirun --allow-run-as-root --oversubscribe -np {n_procs} $SOLVER -parallel 2>&1 || $SOLVER 2>&1\n'
+            f'echo "=== reconstructPar ==="\n'
+            f'reconstructPar -latestTime 2>&1 | tail -3'
+        )
+    else:
+        run_block = "$SOLVER 2>&1 || true"
     of_script = f"""#!/bin/bash
 for _of in /usr/lib/openfoam/openfoam2412/etc/bashrc /usr/lib/openfoam/openfoam2406/etc/bashrc /opt/openfoam*/etc/bashrc; do [ -f "$_of" ] && source "$_of" && break; done
 cd "{of_case}"
@@ -598,10 +625,13 @@ print('Boundary: section=wall, frontAndBack=empty, farfield=patch')
 " 2>&1
 cd "{of_case}"
 
+echo "=== renumberMesh ==="
+renumberMesh -overwrite 2>&1 | tail -3 || true
+
 echo "=== Starting solver ==="
 SOLVER=$(grep "application" system/controlDict | awk '{{print $2}}' | tr -d ';\\r\\n')
 echo "Solver: $SOLVER"
-$SOLVER 2>&1 || true
+{run_block}
 
 echo "=== Post-processing: vorticity ==="
 postProcess -func vorticity -latestTime 2>&1 | tail -3 || true
@@ -1512,8 +1542,11 @@ print('Boundary patched')
 fi
 cd "{of_case}"
 
+echo "=== renumberMesh ==="
+renumberMesh -overwrite 2>&1 | tail -3 || true
+
 echo "=== simpleFoam ({n_procs} procs) ==="
-{"decomposePar 2>&1 | tail -3 && mpirun --oversubscribe -np " + str(n_procs) + " simpleFoam -parallel 2>&1 || simpleFoam 2>&1" if n_procs > 1 else "simpleFoam 2>&1"} || true
+{"decomposePar 2>&1 | tail -3 && mpirun --allow-run-as-root --oversubscribe -np " + str(n_procs) + " simpleFoam -parallel 2>&1 || simpleFoam 2>&1" if n_procs > 1 else "simpleFoam 2>&1"} || true
 
 {"reconstructPar -latestTime 2>&1 | tail -3" if n_procs > 1 else ""}
 
@@ -2014,11 +2047,14 @@ cd "{of_case}"
 echo "=== checkMesh ==="
 checkMesh 2>&1 | grep -E "cells|faces|Maximum|Minimum|FAILED|OK|WARNING" || true
 
+echo "=== renumberMesh ==="
+renumberMesh -overwrite 2>&1 | tail -3 || true
+
 {"" if not use_parallel else f'''echo "=== decomposePar ({n_procs} domains) ==="
 decomposePar 2>&1 | tail -5
 '''}
 echo "=== Starting simpleFoam ==="
-{"mpirun --oversubscribe -np " + str(n_procs) + " simpleFoam -parallel 2>&1 || simpleFoam 2>&1" if use_parallel else "simpleFoam 2>&1"} || true
+{"mpirun --allow-run-as-root --oversubscribe -np " + str(n_procs) + " simpleFoam -parallel 2>&1 || simpleFoam 2>&1" if use_parallel else "simpleFoam 2>&1"} || true
 
 {"" if not use_parallel else '''echo "=== reconstructPar ==="
 reconstructPar -latestTime 2>&1 | tail -3
@@ -2258,7 +2294,13 @@ def extract_slice(case_dir, plane="z", value=0, field="pressure", tolerance=None
     bld_height = meta.get("height", 0)
     bld_list = meta.get("buildings", [])
 
-    # Compute building-centered crop region (all buildings)
+    # Compute building-centered crop region (all buildings).
+    # The crop sets the grid resolution near the body (grid spacing = crop_span / n_grid).
+    # On a HORIZONTAL (z) slice the cutout is the footprint, so the crop must scale with
+    # the footprint span — NOT the building height, otherwise a tall slim tower (e.g. a
+    # cylinder) gets a huge height-driven crop and its round cross-section renders as a
+    # coarse grid staircase. Vertical slices keep the height-based crop (they need the
+    # full vertical extent for the wake).
     crop_radius = None
     bld_cx, bld_cy = 0, 0
     if bld_list:
@@ -2267,15 +2309,16 @@ def extract_slice(case_dir, plane="z", value=0, field="pressure", tolerance=None
         bld_cx = (min(all_xs) + max(all_xs)) / 2
         bld_cy = (min(all_ys) + max(all_ys)) / 2
         bld_span = max(max(all_xs) - min(all_xs), max(all_ys) - min(all_ys))
-        crop_radius = max(bld_span, bld_height) * 2.0
+        crop_radius = (bld_span * 3.0) if plane == "z" else (max(bld_span, bld_height) * 2.0)
     elif footprint and bld_height > 0:
         fp_xs = [p[0] for p in footprint]
         fp_ys = [p[1] for p in footprint]
         bld_cx = (min(fp_xs) + max(fp_xs)) / 2
         bld_cy = (min(fp_ys) + max(fp_ys)) / 2
         bld_span = max(max(fp_xs) - min(fp_xs), max(fp_ys) - min(fp_ys))
-        # Crop: 3× body span (captures wake + near-field)
-        crop_radius = max(bld_span, bld_height) * 3.0
+        # Horizontal: ~4× footprint span (building + near wake) → fine grid on the cutout.
+        # Vertical: 3× max(span, height) as before.
+        crop_radius = (bld_span * 4.0) if plane == "z" else (max(bld_span, bld_height) * 3.0)
 
     # Auto tolerance: use the smallest cells near the body, not the average
     if tolerance is None:

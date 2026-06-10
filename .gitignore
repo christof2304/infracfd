@@ -7,3 +7,4 @@ cfd_*/
 cfd3d_*/
 *.log
 .DS_Store
+venv/

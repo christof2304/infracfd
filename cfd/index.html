@@ -853,6 +853,16 @@ select.p-input option { background: var(--bg-panel); }
             <input type="range" id="domain-size-3d" class="p-slider" min="2" max="8" value="3" step="1"
                 oninput="document.getElementById('domain-val-3d').textContent=this.value+'×'">
             <div class="p-slider-row"><span>eng</span><span>weit</span></div>
+
+            <label style="font-size:11px;color:var(--text-dim);display:block;margin:8px 0 3px" title="Zellgröße an der Gebäudewand (relativ zur Höhe). Fein = runde Wände folgen besser, aber deutlich mehr Zellen und längere Rechenzeit.">Mesh-Dichte: <span id="density-val-3d" style="color:var(--text-mono)">50%</span></label>
+            <input type="range" id="mesh-density-3d" class="p-slider" min="10" max="100" value="50" step="5"
+                oninput="document.getElementById('density-val-3d').textContent=this.value+'%'" style="accent-color:#44bb44">
+            <div class="p-slider-row"><span>grob (schnell)</span><span>fein (langsam)</span></div>
+
+            <div class="p-row" style="margin-top:8px">
+                <label title="Maximale Solver-Iterationen (stationär). Mehr = genauer, aber langsamer. Stoppt früher, sobald konvergiert.">Iterationen</label>
+                <input type="number" id="iterations-3d" class="p-input" value="500" min="50" max="3000" step="50">
+            </div>
         </div>
 
         <button class="run-btn" id="btn-run-3d">▶ 3D OpenFOAM Berechnung</button>

@@ -49,6 +49,26 @@ _cfd_log_queue = queue.Queue()
 _cfd_status = {"running": False, "result": None}
 
 
+def _case_has_results(case_dir):
+    """True if the 3D case wrote at least one solved time>0 dir containing a p field.
+    A diverged or killed solve leaves only 0/ → slice/streamline endpoints would 404.
+    Used to report an honest failure instead of a misleading success."""
+    try:
+        p = Path(case_dir)
+        if not p.is_dir():
+            return False
+        for d in p.iterdir():
+            if d.is_dir():
+                try:
+                    if float(d.name) > 0 and (d / "p").exists():
+                        return True
+                except ValueError:
+                    pass
+    except Exception:
+        pass
+    return False
+
+
 # ── 2D CFD ───────────────────────────────────────────────────────────────────
 
 @app.post("/api/cfd/mesh")
@@ -226,13 +246,33 @@ def cfd_timestep(body: dict):
             if abs(pt[2]) < 0.01:
                 nodes_2d.append({"id": i, "x": round(pt[0], 4), "y": round(pt[1], 4)})
 
+    # Near-field filter — MUST match parse_cfd_results() exactly, otherwise the
+    # triangle list diverges from the static result mesh and the animation
+    # frame colors land on the wrong triangles ("confetti"). The frontend sends
+    # `polygon` precisely so this filter reproduces the initial solve's mesh.
+    near_r2 = None
+    sec_cx = sec_cy = 0.0
+    section_polygon = body.get("polygon")
+    if section_polygon:
+        sx = [p[0] for p in section_polygon]
+        sy = [p[1] for p in section_polygon]
+        sec_cx = sum(sx) / len(sx)
+        sec_cy = sum(sy) / len(sy)
+        char_dim = max(max(sx) - min(sx), max(sy) - min(sy), 0.1)
+        near_r2 = max(char_dim * 8, 10.0) ** 2
+
     triangles = []
-    if faces and owner and points and cell_values:
+    if faces and owner and points:  # match parse_cfd_results: build even if field is uniform
         for i, face in enumerate(faces):
             if len(face) < 3: continue
             face_pts = [points[n] for n in face if n < len(points)]
             if not face_pts: continue
             if abs(sum(p[2] for p in face_pts) / len(face_pts)) > 0.01: continue
+            if near_r2 is not None:
+                cx = sum(p[0] for p in face_pts) / len(face_pts)
+                cy = sum(p[1] for p in face_pts) / len(face_pts)
+                if (cx - sec_cx) ** 2 + (cy - sec_cy) ** 2 > near_r2:
+                    continue
             cell_id = owner[i] if i < len(owner) else -1
             p_val   = cell_values[cell_id] if 0 <= cell_id < len(cell_values) else 0
             for j in range(1, len(face) - 1):
@@ -260,7 +300,7 @@ def cfd_solve3d(body: dict):
     z0            = body.get("z0", 0.1)
     mesh_size     = body.get("meshSize", None)
     n_iterations  = body.get("nIterations", 500)
-    n_procs       = body.get("nProcs", 1)
+    n_procs       = body.get("nProcs", 4)  # server has 8 cores; run parallel (falls back to serial)
     domain_factor = body.get("domainFactor", 3)
 
     max_height = max(b["height"] for b in buildings) if buildings else height
@@ -307,6 +347,116 @@ print(json.dumps(result))
         for line in reversed(output_lines):
             if line.strip().startswith("{"):
                 result = json.loads(line.strip())
+                if result.get("success") and not _case_has_results(result.get("case_dir", "")):
+                    result["success"] = False
+                    result["error"] = ("Solver schrieb keine Ergebnis-Zeitschritte (divergiert oder nicht "
+                                        "konvergiert). Bitte erneut berechnen — ggf. Mesh/Windgeschwindigkeit anpassen.")
+                _cfd_status["result"] = result
+                return result
+        raise HTTPException(status_code=500, detail="No result JSON")
+    except HTTPException:
+        _cfd_status["running"] = False
+        raise
+    except Exception as e:
+        _cfd_status["running"] = False
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/cfd/upload-model")
+async def cfd_upload_model(file: UploadFile = File(...)):
+    """Accept a GLB/GLTF/STL/OBJ upload, store it, return URL + bounds + height."""
+    import secrets
+    import trimesh
+
+    name = Path(file.filename or "model").name
+    ext  = Path(name).suffix.lower()
+    if ext not in (".glb", ".gltf", ".stl", ".obj"):
+        raise HTTPException(status_code=400, detail=f"Unsupported format '{ext}' (use .glb/.gltf/.stl/.obj)")
+
+    safe = f"{secrets.token_hex(4)}_{name}"
+    dest = UPLOADS_DIR / safe
+    dest.write_bytes(await file.read())
+
+    try:
+        scene = trimesh.load(str(dest))
+        mesh  = (trimesh.util.concatenate(list(scene.geometry.values()))
+                 if isinstance(scene, trimesh.Scene) else scene)
+        bb = mesh.bounds
+        bounds = {"min": bb[0].tolist(), "max": bb[1].tolist()}
+        height = float(bb[1][2] - bb[0][2])
+    except Exception as e:
+        dest.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail=f"Could not parse model: {e}")
+
+    return {"url": f"/uploads/{safe}", "bounds": bounds, "height": height}
+
+
+@app.post("/api/cfd/solve3d-stl")
+def cfd_solve3d_stl(body: dict):
+    """Run 3D OpenFOAM building CFD on an uploaded GLB/STL via snappyHexMesh."""
+    import subprocess as sp
+    import tempfile
+
+    stl_path = body.get("stlPath", "")
+    model_file = UPLOADS_DIR / Path(stl_path).name
+    if not stl_path or not model_file.is_file():
+        raise HTTPException(status_code=400, detail="Uploaded model not found — upload it again")
+
+    scale         = float(body.get("stlScale", 1.0))
+    wind_speed    = float(body.get("windSpeed", 10))
+    wind_angle    = float(body.get("windAngle", 0))
+    z0            = float(body.get("z0", 0.1))
+    domain_factor = float(body.get("domainFactor", 3))
+    n_iterations  = int(body.get("nIterations", 500))
+    n_procs       = int(body.get("nProcs", 4))
+    mesh_size     = body.get("meshSize", None)  # near-wall cell size (None → auto char_dim/20)
+
+    case_dir = tempfile.mkdtemp(prefix="cfd3dstl_")
+
+    while not _cfd_log_queue.empty():
+        try: _cfd_log_queue.get_nowait()
+        except: break
+    _cfd_status["running"] = True
+    _cfd_status["result"]  = None
+
+    # Inlet wind is fixed +x; rotate the model by -windAngle about z to realize the angle.
+    script = f"""
+import sys, json
+sys.path.insert(0, r'{PROJECT_ROOT}')
+from tools.cfd_openfoam import prepare_stl_case, run_openfoam_3d_stl
+
+prep = prepare_stl_case(r'{model_file}', r'{case_dir}', scale={scale},
+    wind_speed={wind_speed}, z0={z0}, domain_factor={domain_factor},
+    n_procs={n_procs}, n_iterations={n_iterations}, rot_z={-wind_angle},
+    mesh_size={mesh_size if mesh_size else 'None'})
+result = run_openfoam_3d_stl(r'{case_dir}', n_procs={n_procs})
+result["case_dir"]        = r'{case_dir}'
+result["mode"]            = "3d"
+result["bbox"]            = prep.get("bounds")
+result["building_height"] = prep.get("height")
+print(json.dumps(result))
+"""
+    try:
+        proc = sp.Popen([sys.executable, "-c", script], stdout=sp.PIPE, stderr=sp.STDOUT, text=True)
+        output_lines = []
+        for line in iter(proc.stdout.readline, ""):
+            output_lines.append(line)
+            if any(kw in line for kw in ["Time =", "Cd:", "Cl:", "===", "Mesh", "Re =",
+                                          "blockMesh", "snappy", "FOAM", "Centered", "Rotated"]):
+                _cfd_log_queue.put(line.rstrip())
+        proc.wait()
+        _cfd_status["running"] = False
+        _cfd_log_queue.put("__DONE__")
+
+        if proc.returncode != 0:
+            raise HTTPException(status_code=500, detail=f"3D STL CFD failed: {''.join(output_lines[-10:])}")
+        for line in reversed(output_lines):
+            if line.strip().startswith("{"):
+                result = json.loads(line.strip())
+                if result.get("success") and not _case_has_results(result.get("case_dir", "")):
+                    result["success"] = False
+                    result["error"] = ("Solver schrieb keine Ergebnis-Zeitschritte (divergiert oder nicht "
+                                        "konvergiert). Bitte erneut berechnen — ggf. Mesh/Windgeschwindigkeit anpassen.")
                 _cfd_status["result"] = result
                 return result
         raise HTTPException(status_code=500, detail="No result JSON")

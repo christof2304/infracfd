@@ -77,7 +77,7 @@ export const CFD_TEST_CASES = [
         desc: "Referenz: Re-abhängiger cD (~1.2 bei Re>10^5)",
         polygon: (() => {
             const pts = [];
-            const n = 32;
+            const n = 64;
             for (let i = 0; i < n; i++) {
                 const a = 2 * Math.PI * i / n;
                 pts.push([0.5 * Math.cos(a), 0.5 * Math.sin(a)]);
@@ -213,7 +213,7 @@ export const CFD_TEST_CASES = [
         z0: 0.3,
         polygon: (() => {
             const pts = [];
-            const n = 24;
+            const n = 48;
             for (let i = 0; i < n; i++) {
                 const a = 2 * Math.PI * i / n;
                 pts.push([15 * Math.cos(a), 15 * Math.sin(a)]);
@@ -269,8 +269,9 @@ export const CFD_TEST_CASES = [
             // Zylindrischer Bau (Nordost)
             { footprint: (() => {
                 const pts = [];
-                for (let i = 0; i < 16; i++) {
-                    const a = 2 * Math.PI * i / 16;
+                const n = 40;
+                for (let i = 0; i < n; i++) {
+                    const a = 2 * Math.PI * i / n;
                     pts.push([45 + 12 * Math.cos(a), 40 + 12 * Math.sin(a)]);
                 }
                 return pts;

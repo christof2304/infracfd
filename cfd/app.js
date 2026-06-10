@@ -643,21 +643,29 @@ class CFDApp {
         const height     = parseFloat(document.getElementById('building-height').value) || 40;
         const z0         = parseFloat(document.getElementById('roughness').value) || 0.1;
         const domainMul  = parseFloat(document.getElementById('domain-size-3d').value) || 3;
+        const nIterations = parseInt(document.getElementById('iterations-3d').value) || 500;
+        // Mesh density 10..100% → near-wall cell size = H / factor (15 coarse .. 40 fine).
+        // 50% ≈ H/26 ≈ the backend default (H/25), so the slider's midpoint keeps current behaviour.
+        const density3d  = parseFloat(document.getElementById('mesh-density-3d').value) || 50;
+        const meshFactor = 15 + (density3d - 10) / 90 * (40 - 15);
 
         let body;
         if (this._glbUrl) {
             body = { stlPath: this._glbUrl.replace('/uploads/', ''), stlScale: this._glbScale,
-                     windSpeed, windAngle, buildingHeight: height, z0, domainFactor: domainMul };
+                     windSpeed, windAngle, buildingHeight: height, z0, domainFactor: domainMul, nIterations };
         } else {
             const tc = this._tc3d || CASES_3D[0];
             if (!tc) { this._setStatus('Kein 3D Modell geladen', 'error'); this._solving = false; return; }
             body = { footprint: tc.polygon, height: tc.height || height,
-                     windSpeed, windAngle, z0, domainFactor: domainMul };
+                     windSpeed, windAngle, z0, domainFactor: domainMul, nIterations };
             if (tc.buildings?.length > 0) {
                 body.buildings = tc.buildings;
                 body.height = Math.max(...tc.buildings.map(b => b.height));
             }
         }
+        // Near-wall mesh size relative to the (effective) building height.
+        const hEff = body.height ?? body.buildingHeight ?? height;
+        body.meshSize = Math.max(hEff / meshFactor, 0.3);
 
         const endpoint = this._glbUrl ? '/api/cfd/solve3d-stl' : '/api/cfd/solve3d';
 
@@ -742,6 +750,14 @@ class CFDApp {
         this._setStatus('Berechnung abgeschlossen', 'ok');
         if (!this._solveResult) {
             this._appendLog('⚠ Ergebnis-Daten nicht empfangen. Bitte erneut versuchen.');
+            return;
+        }
+        // Solver ran but produced no usable result (diverged / no time steps written).
+        // Surface it here instead of silently 404ing on every slice/streamline fetch.
+        if (this._solveResult.success === false || this._solveResult.error) {
+            const msg = this._solveResult.error || 'Berechnung fehlgeschlagen.';
+            this._appendLog('⚠ ' + msg);
+            this._setStatus(msg, 'error');
             return;
         }
         // 2D result: has field data inline
@@ -1267,6 +1283,13 @@ class CFDApp {
             this._fetchSlice('z', hzVal, field),
             this._fetchSlice('y', vtVal, field),
         ]);
+
+        // Both failed → the case is gone or empty (e.g. /tmp cleared, server restarted,
+        // or solve never finished). Tell the user instead of failing silently.
+        if (!hzData && !vtData) {
+            this._setStatus('3D-Ergebnis nicht mehr verfügbar — bitte neu berechnen.', 'error');
+            return;
+        }
 
         const hzOn = document.getElementById('show-hz-plane').checked;
         const vtOn = document.getElementById('show-vt-plane').checked;

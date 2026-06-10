@@ -490,10 +490,14 @@ export class Viewer3D {
 
         const grp = new THREE.Group();
         const fill = new THREE.Mesh(geom,
-            new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.12, side: THREE.DoubleSide }));
+            // depthWrite off + low renderOrder: the reference plane never z-fights the colored
+            // result slice that sits on the same coordinate — the result always draws on top.
+            new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.12, side: THREE.DoubleSide,
+                                          depthWrite: false }));
         const edge = new THREE.LineSegments(new THREE.EdgesGeometry(geom),
             new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.6 }));
         grp.add(fill, edge);
+        grp.renderOrder = 0;
         grp.position.copy(pos);
         if (rot) grp.rotation.copy(rot);
 
@@ -579,7 +583,11 @@ export class Viewer3D {
         geom.setAttribute('color',    new THREE.BufferAttribute(col, 3));
         const mesh = new THREE.Mesh(geom,
             new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide,
-                                          transparent: true, opacity: 0.88 }));
+                                          transparent: true, opacity: 0.88,
+                                          // Pull the colored result slightly toward the camera in depth so it
+                                          // consistently wins over the coplanar reference plane (no z-fighting).
+                                          polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }));
+        mesh.renderOrder = 2;
         this._slices[sliceId] = mesh;
         this._sliceGroup.add(mesh);
         return { vmin, vmax };
