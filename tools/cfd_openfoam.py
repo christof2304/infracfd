@@ -2067,16 +2067,22 @@ def parse_cfd_results_3d(case_dir):
     time_dirs.sort(key=lambda d: float(d.name))
     latest = time_dirs[-1]
 
-    # Parse cell centers — OpenFOAM 2406+ writes to postProcessing/writeCellCentres/<time>/C
+    # Parse cell centers — try several locations then fall back to mesh computation
+    cell_centers = None
     c_path = latest / "C"
-    if not c_path.exists():
+    if c_path.exists():
+        cell_centers = _parse_of_vector_field(c_path)
+    if not cell_centers:
         pp_wcc = case_dir / "postProcessing" / "writeCellCentres"
         if pp_wcc.exists():
             pp_times = sorted([d for d in pp_wcc.iterdir() if d.is_dir()],
                               key=lambda d: float(d.name) if d.name.replace('.','',1).isdigit() else 0)
-            if pp_times:
-                c_path = pp_times[-1] / "C"
-    cell_centers = _parse_of_vector_field(c_path)
+            for pt in reversed(pp_times):
+                cell_centers = _parse_of_vector_field(pt / "C")
+                if cell_centers:
+                    break
+    if not cell_centers:
+        cell_centers = _cell_centers_from_mesh(case_dir / "constant" / "polyMesh")
     if not cell_centers:
         return None
 
@@ -2122,6 +2128,52 @@ def parse_cfd_results_3d(case_dir):
     }
 
 
+def _cell_centers_from_mesh(mesh_dir):
+    """Compute approximate cell centers from constant/polyMesh (always available).
+
+    Averages the face centers of all faces belonging to each cell — fast enough
+    for meshes up to ~500 k cells using numpy.
+    """
+    mesh_dir = Path(mesh_dir)
+    points_raw = _parse_of_vector_field(mesh_dir / "points")
+    faces_raw  = _parse_of_faces(mesh_dir / "faces")
+    owner_raw  = _parse_of_int_list(mesh_dir / "owner")
+    if not points_raw or not faces_raw or not owner_raw:
+        return None
+    try:
+        import numpy as np
+        pts   = np.array(points_raw, dtype=np.float64)
+        owner = np.array(owner_raw,  dtype=np.int32)
+
+        n_cells = int(owner.max()) + 1
+        cell_sum = np.zeros((n_cells, 3), dtype=np.float64)
+        cell_cnt = np.zeros(n_cells, dtype=np.int32)
+        for fi, face in enumerate(faces_raw):
+            if fi >= len(owner_raw):
+                break
+            fc = pts[face].mean(axis=0)
+            c  = owner_raw[fi]
+            cell_sum[c] += fc
+            cell_cnt[c] += 1
+
+        neighbour_raw = _parse_of_int_list(mesh_dir / "neighbour")
+        if neighbour_raw:
+            for fi, face in enumerate(faces_raw):
+                if fi >= len(neighbour_raw):
+                    break
+                fc = pts[face].mean(axis=0)
+                c  = neighbour_raw[fi]
+                if 0 <= c < n_cells:
+                    cell_sum[c] += fc
+                    cell_cnt[c] += 1
+
+        mask = cell_cnt > 0
+        cell_sum[mask] /= cell_cnt[mask, np.newaxis]
+        return [tuple(row) for row in cell_sum]
+    except Exception:
+        return None
+
+
 def extract_slice(case_dir, plane="z", value=0, field="pressure", tolerance=None):
     """Extract a 2D slice from 3D CFD results.
 
@@ -2151,16 +2203,22 @@ def extract_slice(case_dir, plane="z", value=0, field="pressure", tolerance=None
     time_dirs.sort(key=lambda d: float(d.name))
     latest = time_dirs[-1]
 
-    # Parse cell centers — OpenFOAM 2406+ writes to postProcessing/writeCellCentres/<time>/C
+    # Parse cell centers — try several locations then fall back to mesh computation
+    cell_centers = None
     c_path = latest / "C"
-    if not c_path.exists():
+    if c_path.exists():
+        cell_centers = _parse_of_vector_field(c_path)
+    if not cell_centers:
         pp_wcc = case_dir / "postProcessing" / "writeCellCentres"
         if pp_wcc.exists():
             pp_times = sorted([d for d in pp_wcc.iterdir() if d.is_dir()],
                               key=lambda d: float(d.name) if d.name.replace('.','',1).isdigit() else 0)
-            if pp_times:
-                c_path = pp_times[-1] / "C"
-    cell_centers = _parse_of_vector_field(c_path)
+            for pt in reversed(pp_times):
+                cell_centers = _parse_of_vector_field(pt / "C")
+                if cell_centers:
+                    break
+    if not cell_centers:
+        cell_centers = _cell_centers_from_mesh(case_dir / "constant" / "polyMesh")
     if not cell_centers:
         return None
 
