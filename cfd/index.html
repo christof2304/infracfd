@@ -1,0 +1,949 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CFD Windanalyse</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='4' fill='%230d0f14'/><text x='16' y='23' font-size='16' font-family='monospace' font-weight='bold' fill='%233d9eff' text-anchor='middle'>W</text></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+
+<style>
+/* ─── Design Tokens ────────────────────────────────────────────── */
+:root {
+    --bg:        #0d0f14;
+    --bg-panel:  #111318;
+    --bg-input:  #0d1018;
+    --border:    #1e2430;
+    --border-hi: #2a3444;
+    --text:      #c4cdde;
+    --text-dim:  #6a7a8e;
+    --text-mono: #9ab0c8;
+    --accent:    #3d9eff;
+    --accent-dim: rgba(61,158,255,0.12);
+    --accent-dim2: rgba(61,158,255,0.22);
+    --mint:      #00e5b0;
+    --danger:    #ff6b35;
+    --warn:      #ffaa44;
+    --font-ui:   'Barlow Condensed', 'Segoe UI', sans-serif;
+    --font-mono: 'JetBrains Mono', 'Consolas', monospace;
+    --sb-w:      210px;
+    --params-w:  236px;
+    --hdr-h:     44px;
+    --status-h:  26px;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; overflow: hidden; }
+body { font-family: var(--font-ui); font-size: 13px; color: var(--text); background: var(--bg); }
+
+/* ─── Layout ────────────────────────────────────────────────────── */
+#app {
+    display: grid;
+    grid-template-rows: var(--hdr-h) 1fr var(--status-h);
+    grid-template-columns: var(--sb-w) 1fr var(--params-w);
+    height: 100vh;
+}
+
+/* Header */
+#header {
+    grid-column: 1 / -1;
+    grid-row: 1;
+    display: flex;
+    align-items: center;
+    gap: 0;
+    background: var(--bg-panel);
+    border-bottom: 1px solid var(--border);
+    padding: 0 12px;
+    gap: 8px;
+    user-select: none;
+}
+
+.app-logo {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--accent);
+    letter-spacing: 0.03em;
+    margin-right: 16px;
+    white-space: nowrap;
+}
+.app-logo span { color: var(--text-dim); font-weight: 400; font-size: 12px; margin-left: 6px; }
+
+.tab-btn {
+    padding: 0 14px;
+    height: 100%;
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: var(--text-dim);
+    font-family: var(--font-ui);
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: color 0.15s, border-color 0.15s;
+    white-space: nowrap;
+}
+.tab-btn:hover { color: var(--text); }
+.tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+.hdr-spacer { flex: 1; }
+#hdr-status { font-size: 11px; color: var(--text-dim); font-family: var(--font-mono); }
+
+/* View toggle */
+.view-toggle {
+    display: flex;
+    align-items: center;
+    gap: 1px;
+    background: var(--bg);
+    border: 1px solid var(--border-hi);
+    border-radius: 5px;
+    padding: 2px;
+    margin-left: 8px;
+}
+.vbtn {
+    width: 30px; height: 22px;
+    border: none;
+    background: none;
+    color: var(--text-dim);
+    cursor: pointer;
+    border-radius: 3px;
+    font-size: 13px;
+    display: flex; align-items: center; justify-content: center;
+    transition: background 0.1s, color 0.1s;
+}
+.vbtn:hover:not(.active) { color: var(--text); background: rgba(255,255,255,0.04); }
+.vbtn.active { background: var(--accent-dim); color: var(--accent); }
+.vbtn:disabled { opacity: 0.3; cursor: default; }
+.vbtn:disabled:hover { background: none; color: var(--text-dim); }
+
+/* Sidebar */
+#sidebar {
+    grid-column: 1;
+    grid-row: 2;
+    background: var(--bg-panel);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.sb-section { padding: 10px 12px 6px; }
+.sb-label {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    margin-bottom: 6px;
+}
+
+/* Example list — scrollable, takes remaining space in flex sidebar */
+.example-list {
+    overflow-y: auto;
+    flex: 1;
+    min-height: 0;   /* required for flex children to shrink below content size */
+    padding: 0 6px 6px;
+}
+.example-list::-webkit-scrollbar { width: 4px; }
+.example-list::-webkit-scrollbar-track { background: transparent; }
+.example-list::-webkit-scrollbar-thumb { background: var(--border-hi); border-radius: 2px; }
+
+.example-item {
+    padding: 7px 8px;
+    border-radius: 5px;
+    cursor: pointer;
+    border: 1px solid transparent;
+    margin-bottom: 2px;
+    transition: background 0.1s, border-color 0.1s;
+}
+.example-item:hover { background: var(--accent-dim); border-color: var(--border-hi); }
+.example-name { font-size: 12px; font-weight: 500; color: var(--text); }
+.example-meta { font-size: 10px; color: var(--text-dim); font-family: var(--font-mono); margin-top: 1px; }
+
+/* Draw tools */
+.tool-row {
+    display: flex;
+    gap: 4px;
+    padding: 6px 12px;
+    border-top: 1px solid var(--border);
+}
+
+.tool-btn {
+    flex: 1;
+    padding: 5px 6px;
+    background: none;
+    border: 1px solid var(--border-hi);
+    border-radius: 4px;
+    color: var(--text-dim);
+    font-family: var(--font-ui);
+    font-size: 11px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.12s;
+}
+.tool-btn:hover { color: var(--text); border-color: var(--accent); }
+.tool-btn.active { color: var(--accent); border-color: var(--accent); background: var(--accent-dim); }
+
+/* Canvas area — single stacked canvas, two states */
+#canvas-area {
+    grid-column: 2;
+    grid-row: 2;
+    position: relative;
+    overflow: hidden;
+    background: var(--bg);
+}
+
+/* Both canvases fill the area, stacked */
+#svg-canvas,
+#gl-canvas {
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+}
+
+#svg-canvas  { display: block; z-index: 2; }
+#gl-canvas   { display: none;  z-index: 1; outline: none; }
+
+/* Draw mode: SVG on top, GL hidden */
+#canvas-area.view-draw   #svg-canvas { display: block; pointer-events: all; }
+#canvas-area.view-draw   #gl-canvas  { display: none; }
+
+/* Result mode: GL visible, SVG hidden */
+#canvas-area.view-result #svg-canvas { display: none; }
+#canvas-area.view-result #gl-canvas  { display: block; }
+
+/* 3D tab: always GL full */
+#canvas-area.tab-3d #svg-canvas { display: none !important; }
+#canvas-area.tab-3d #gl-canvas  { display: block !important; }
+
+/* Log + result panels (overlay over canvas) */
+#log-panel {
+    display: none;
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 180px;
+    background: rgba(10,12,18,0.92);
+    border-top: 1px solid var(--border-hi);
+}
+#log-output {
+    width: 100%;
+    height: 100%;
+    background: none;
+    border: none;
+    color: #5a8a5a;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    padding: 8px 10px;
+    overflow-y: auto;
+    resize: none;
+    outline: none;
+    white-space: pre;
+}
+
+#result-panel {
+    display: none;
+    position: absolute;
+    top: 10px;
+    left: 10px;
+    background: var(--bg-panel);
+    border: 1px solid var(--border-hi);
+    border-radius: 6px;
+    padding: 10px 14px;
+    min-width: 160px;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+}
+.coeff-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 4px;
+    gap: 16px;
+}
+.coeff-label { font-size: 11px; color: var(--text-dim); }
+.coeff-val   { font-family: var(--font-mono); font-size: 13px; color: var(--mint); font-weight: 500; }
+
+/* Right params panel */
+#params {
+    grid-column: 3;
+    grid-row: 2;
+    background: var(--bg-panel);
+    border-left: 1px solid var(--border);
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+}
+#params::-webkit-scrollbar { width: 4px; }
+#params::-webkit-scrollbar-thumb { background: var(--border-hi); border-radius: 2px; }
+
+.p-section {
+    margin-bottom: 14px;
+}
+.p-label {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    margin-bottom: 8px;
+    padding-bottom: 4px;
+    border-bottom: 1px solid var(--border);
+}
+
+.p-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 6px;
+    gap: 6px;
+}
+.p-row label { font-size: 11px; color: var(--text-dim); white-space: nowrap; }
+
+.p-input {
+    width: 70px;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    color: var(--text);
+    padding: 3px 6px;
+    font-size: 12px;
+    font-family: var(--font-mono);
+    text-align: right;
+    transition: border-color 0.12s;
+}
+.p-input:focus { outline: none; border-color: var(--accent); }
+
+.p-slider { width: 100%; margin-bottom: 4px; accent-color: var(--accent); cursor: pointer; height: 4px; }
+
+.p-slider-row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 9px;
+    color: #446;
+    margin-bottom: 8px;
+}
+
+.p-checkbox-row {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    margin-bottom: 6px;
+}
+.p-checkbox-row input[type=checkbox] { accent-color: var(--accent); cursor: pointer; }
+.p-checkbox-row label { font-size: 11px; color: var(--text-dim); cursor: pointer; }
+
+.p-sub { padding-left: 18px; margin-bottom: 4px; }
+
+/* Dimensional forces table */
+.forces-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 11px;
+    margin-top: 4px;
+}
+.forces-table td {
+    padding: 2px 4px;
+    font-family: var(--font-mono);
+}
+.forces-table td:first-child { color: var(--text-dim); }
+.forces-table td:last-child   { color: var(--mint); text-align: right; font-weight: 600; }
+
+/* Cp chart */
+#cp-chart-wrap {
+    display: none;
+    margin-top: 8px;
+}
+#cp-chart-wrap svg { display: block; width: 100%; overflow: visible; }
+.cp-label {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    margin-bottom: 4px;
+}
+
+/* Run button */
+.run-btn {
+    width: 100%;
+    padding: 8px;
+    background: rgba(0,229,176,0.12);
+    border: 1px solid var(--mint);
+    border-radius: 5px;
+    color: var(--mint);
+    font-family: var(--font-ui);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s;
+    margin-top: 4px;
+}
+.run-btn:hover:not(:disabled) { background: rgba(0,229,176,0.22); }
+.run-btn:disabled { opacity: 0.45; cursor: default; }
+
+/* GLB upload */
+.upload-btn {
+    width: 100%;
+    padding: 6px;
+    background: rgba(255,170,68,0.12);
+    border: 1px solid rgba(255,170,68,0.4);
+    border-radius: 4px;
+    color: var(--warn);
+    font-family: var(--font-ui);
+    font-size: 12px;
+    cursor: pointer;
+    transition: background 0.12s;
+    margin-bottom: 4px;
+}
+.upload-btn:hover { background: rgba(255,170,68,0.22); }
+
+#glb-info {
+    font-size: 10px;
+    color: #44bb44;
+    font-family: var(--font-mono);
+    word-break: break-all;
+    margin-bottom: 4px;
+    min-height: 14px;
+}
+
+/* Sidebar sections — each fills the sidebar as a flex column */
+#sidebar-2d, #sidebar-3d {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    overflow: hidden;
+    min-height: 0;
+}
+#sidebar-3d         { display: none; }
+#sidebar-results    { display: none; }
+#params-3d          { display: none; }
+
+/* Status bar */
+#statusbar {
+    grid-column: 1 / -1;
+    grid-row: 3;
+    background: var(--bg-panel);
+    border-top: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    padding: 0 12px;
+    gap: 12px;
+    font-size: 11px;
+}
+.status-msg { color: var(--text-dim); font-family: var(--font-mono); }
+.status-info  { color: var(--text-dim); }
+.status-error { color: var(--danger); }
+.status-ok    { color: var(--mint); }
+
+/* ── Wind indicator ──────────────────────────────────────── */
+#wind-indicator {
+    position: absolute;
+    bottom: 14px;
+    left: 14px;
+    z-index: 12;
+    pointer-events: none;
+    display: block;
+}
+/* Hide in 3D tab (wind indicator is 2D-specific) */
+#canvas-area.tab-3d #wind-indicator { display: none; }
+
+/* ── Colorbar ─────────────────────────────────────────────── */
+#colorbar {
+    display: none;
+    position: absolute;
+    right: 14px;
+    top: 50%;
+    transform: translateY(-50%);
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 4px;
+    z-index: 10;
+    pointer-events: none;
+    background: rgba(10,12,18,0.82);
+    border: 1px solid var(--border-hi);
+    border-radius: 6px;
+    padding: 10px 10px 8px;
+    min-width: 80px;
+}
+#canvas-area.view-result #colorbar { display: flex; }
+
+#cb-title {
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--text-dim);
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    text-align: right;
+    margin-bottom: 2px;
+}
+.cb-body {
+    display: flex;
+    flex-direction: row;
+    align-items: stretch;
+    gap: 6px;
+}
+.cb-bar {
+    width: 14px;
+    height: 160px;
+    border-radius: 3px;
+    flex-shrink: 0;
+    background: linear-gradient(to bottom,
+        rgb(128,0,0)   0%,
+        rgb(255,0,0)   12.5%,
+        rgb(255,200,0) 37.5%,
+        rgb(0,255,128) 50%,
+        rgb(0,255,255) 62.5%,
+        rgb(0,100,255) 75%,
+        rgb(0,0,255)   87.5%,
+        rgb(0,0,128)   100%
+    );
+}
+.cb-ticks {
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    height: 160px;
+}
+.cb-ticks span {
+    font-size: 9px;
+    font-family: var(--font-mono);
+    color: var(--text-mono);
+    white-space: nowrap;
+    line-height: 1;
+}
+#cb-unit {
+    font-size: 9px;
+    color: var(--text-dim);
+    font-family: var(--font-mono);
+    text-align: right;
+    margin-top: 2px;
+}
+.status-info  { color: var(--text-dim); }
+.status-error { color: var(--danger); }
+.status-ok    { color: var(--mint); }
+
+/* Result field selector */
+select.p-input {
+    text-align: left;
+    width: 100%;
+    cursor: pointer;
+}
+select.p-input option { background: var(--bg-panel); }
+
+/* ── Animation controls ───────────────────────────────────── */
+#anim-bar {
+    display: none;
+    position: absolute;
+    bottom: 10px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 12;
+    align-items: center;
+    gap: 6px;
+    background: rgba(10,12,18,0.88);
+    border: 1px solid var(--border-hi);
+    border-radius: 8px;
+    padding: 6px 12px;
+    pointer-events: all;
+    white-space: nowrap;
+}
+#canvas-area.view-result #anim-bar { display: flex; }
+#anim-bar.hidden { display: none !important; }
+
+.anim-btn {
+    width: 26px; height: 26px;
+    background: none;
+    border: 1px solid var(--border-hi);
+    border-radius: 4px;
+    color: var(--text-dim);
+    cursor: pointer;
+    font-size: 11px;
+    display: flex; align-items: center; justify-content: center;
+    transition: color 0.1s, border-color 0.1s;
+}
+.anim-btn:hover  { color: var(--accent); border-color: var(--accent); }
+.anim-btn.active { color: var(--mint);   border-color: var(--mint); }
+
+#anim-slider {
+    width: 140px;
+    height: 4px;
+    accent-color: var(--accent);
+    cursor: pointer;
+}
+#anim-time {
+    font-size: 10px;
+    font-family: var(--font-mono);
+    color: var(--text-mono);
+    min-width: 56px;
+    text-align: right;
+}
+
+/* ── Status bar progress ──────────────────────────────────── */
+#statusbar-progress {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-mono);
+    padding-left: 10px;
+    border-left: 1px solid var(--border);
+}
+</style>
+</head>
+<body>
+<div id="app">
+
+<!-- ─── Header ────────────────────────────────────────────────── -->
+<header id="header">
+    <div class="app-logo">CFD <span>Windanalyse</span></div>
+    <button class="tab-btn active" data-tab="2d">2D Querschnitt</button>
+    <button class="tab-btn" data-tab="3d">3D Gebäude</button>
+    <div class="hdr-spacer"></div>
+    <span id="hdr-status"></span>
+    <div class="view-toggle" id="view-toggle">
+        <button class="vbtn active" data-view="draw"   title="Zeichnen">✏</button>
+        <button class="vbtn"        data-view="result" title="Ergebnis" id="vbtn-result" disabled>◉</button>
+    </div>
+</header>
+
+<!-- ─── Sidebar ───────────────────────────────────────────────── -->
+<div id="sidebar">
+
+    <!-- 2D: Bibliothek + Werkzeuge -->
+    <div id="sidebar-2d">
+        <div class="sb-section">
+            <div class="sb-label">Querschnitt-Bibliothek</div>
+        </div>
+        <div id="example-list-2d" class="example-list"></div>
+        <div class="tool-row">
+            <button class="tool-btn active" id="btn-draw" title="Zeichnen (neue Punkte)">✏ Zeichnen</button>
+            <button class="tool-btn" id="btn-select" title="Auswählen / Verschieben">↖ Wählen</button>
+            <button class="tool-btn" id="btn-clear" title="Alles löschen">✕</button>
+        </div>
+        <div class="tool-row">
+            <button class="tool-btn" id="btn-flip-h" title="Horizontal spiegeln (links ↔ rechts)">↔ H</button>
+            <button class="tool-btn" id="btn-flip-v" title="Vertikal spiegeln (oben ↕ unten)">↕ V</button>
+        </div>
+    </div>
+
+    <!-- 3D: Gebäude-Bibliothek + GLB -->
+    <div id="sidebar-3d">
+        <div class="sb-section">
+            <div class="sb-label">Gebäude-Testfälle</div>
+        </div>
+        <div id="example-list-3d" class="example-list"></div>
+    </div>
+
+    <!-- Ergebnisse: nichts / placeholder -->
+    <div id="sidebar-results">
+        <div class="sb-section">
+            <div class="sb-label">Ergebnis-Info</div>
+        </div>
+        <div class="example-list">
+            <div id="result-info" style="padding:4px 2px;font-size:11px;color:var(--text-dim);line-height:1.6"></div>
+        </div>
+    </div>
+
+</div>
+
+<!-- ─── Canvas ───────────────────────────────────────────────── -->
+<div id="canvas-area">
+    <svg id="svg-canvas"></svg>
+    <canvas id="gl-canvas" tabindex="0"></canvas>
+
+    <!-- Wind direction indicator -->
+    <div id="wind-indicator">
+        <canvas id="wind-canvas" width="76" height="90"></canvas>
+    </div>
+
+    <!-- Colorbar legend -->
+    <div id="colorbar">
+        <div id="cb-title">—</div>
+        <div class="cb-body">
+            <div class="cb-bar"></div>
+            <div class="cb-ticks" id="cb-ticks">
+                <span>—</span>
+                <span>—</span>
+                <span>—</span>
+                <span>—</span>
+                <span>—</span>
+            </div>
+        </div>
+        <div id="cb-unit"></div>
+    </div>
+
+    <!-- Animation controls (transient only) -->
+    <div id="anim-bar" class="hidden">
+        <button class="anim-btn" id="anim-first" title="Erster Zeitschritt">⏮</button>
+        <button class="anim-btn" id="anim-prev"  title="Zurück">◀</button>
+        <button class="anim-btn" id="anim-play"  title="Abspielen">▶</button>
+        <button class="anim-btn" id="anim-next"  title="Vor">▶▶</button>
+        <button class="anim-btn" id="anim-last"  title="Letzter Zeitschritt">⏭</button>
+        <input type="range" id="anim-slider" min="0" value="0">
+        <span id="anim-time">t = 0 s</span>
+    </div>
+
+    <!-- Log overlay -->
+    <div id="log-panel">
+        <pre id="log-output"></pre>
+    </div>
+
+    <!-- Result coefficients overlay -->
+    <div id="result-panel">
+        <div style="color:var(--accent);font-size:11px;font-weight:600;margin-bottom:8px;letter-spacing:0.05em">KRAFTBEIWERTE</div>
+        <div class="coeff-row"><span class="coeff-label">c<sub>D</sub></span><span class="coeff-val" id="coeff-cd">—</span></div>
+        <div class="coeff-row"><span class="coeff-label">c<sub>L</sub></span><span class="coeff-val" id="coeff-cl">—</span></div>
+        <div class="coeff-row"><span class="coeff-label">c<sub>M</sub></span><span class="coeff-val" id="coeff-cm">—</span></div>
+        <div style="margin-top:8px;font-size:10px;color:var(--text-dim)">Bereich: <span id="result-range" style="font-family:var(--font-mono)">—</span></div>
+    </div>
+</div>
+
+<!-- ─── Params panel ─────────────────────────────────────────── -->
+<div id="params">
+
+    <!-- 2D params -->
+    <div id="params-2d">
+        <div class="p-section">
+            <div class="p-label">Wind</div>
+            <div class="p-row">
+                <label>Geschwindigkeit [m/s]</label>
+                <input type="number" id="wind-speed" class="p-input" value="20" min="1" max="200" step="5">
+            </div>
+            <div class="p-row">
+                <label>Richtung [°]</label>
+                <input type="number" id="wind-angle" class="p-input" value="0" min="-180" max="180" step="5">
+            </div>
+        </div>
+
+        <div class="p-section">
+            <div class="p-label">Mesh</div>
+            <label style="font-size:11px;color:var(--text-dim);display:block;margin-bottom:3px">Berechnungsraum: <span id="domain-val" style="color:var(--text-mono)">15×</span></label>
+            <input type="range" id="domain-size" class="p-slider" min="8" max="30" value="15" step="1"
+                oninput="document.getElementById('domain-val').textContent=this.value+'×'">
+            <div class="p-slider-row"><span>klein</span><span>groß</span></div>
+
+            <label style="font-size:11px;color:var(--text-dim);display:block;margin-bottom:3px">Mesh-Dichte: <span id="density-val" style="color:var(--text-mono)">50%</span></label>
+            <input type="range" id="mesh-density" class="p-slider" min="10" max="100" value="50" step="5"
+                oninput="document.getElementById('density-val').textContent=this.value+'%'" style="accent-color:#44bb44">
+            <div class="p-slider-row"><span>grob (schnell)</span><span>fein (langsam)</span></div>
+        </div>
+
+        <div class="p-section">
+            <div class="p-label">Simulation</div>
+            <div class="p-checkbox-row">
+                <input type="checkbox" id="transient">
+                <label for="transient">Transient (Wirbelablösung)</label>
+            </div>
+            <div id="transient-opts" style="display:none" class="p-sub">
+                <div class="p-row">
+                    <label>Endzeit [s]</label>
+                    <input type="number" id="end-time" class="p-input" value="2" min="0.5" max="20" step="0.5">
+                </div>
+                <div class="p-row">
+                    <label>Zeitschritt [s]</label>
+                    <input type="number" id="dt" class="p-input" value="0.002" min="0.0001" max="0.1" step="0.001">
+                </div>
+            </div>
+        </div>
+
+        <button class="run-btn" id="btn-mesh-only" disabled
+            style="background:rgba(61,158,255,0.10);border-color:var(--accent);color:var(--accent);margin-bottom:6px">
+            ⬡ Nur Mesh erzeugen
+        </button>
+        <button class="run-btn" id="btn-run-2d" disabled>▶ OpenFOAM Berechnung</button>
+        <button id="btn-clear-2d" style="width:100%;margin-top:4px;padding:4px;background:none;border:1px solid var(--border);border-radius:4px;color:var(--text-dim);cursor:pointer;font-size:11px;font-family:var(--font-ui);display:none" title="Ergebnisse und Ansicht zurücksetzen">× Ergebnisse leeren</button>
+
+        <!-- Dimensional forces — shown after solve -->
+        <div id="forces-section" style="display:none;margin-top:10px">
+            <div class="p-section">
+                <div class="p-label">Kräfte pro Meter [kN/m]</div>
+                <table class="forces-table">
+                    <tr><td>q = ½ρv²</td><td id="f-q">—</td></tr>
+                    <tr><td>H<sub>ref</sub></td><td id="f-href">—</td></tr>
+                    <tr style="border-top:1px solid var(--border)">
+                        <td>F<sub>D</sub></td><td id="f-fd">—</td>
+                    </tr>
+                    <tr><td>F<sub>L</sub></td><td id="f-fl">—</td></tr>
+                    <tr><td>M<sub>T</sub></td><td id="f-mt">— kNm/m</td></tr>
+                </table>
+            </div>
+
+            <!-- Cp distribution chart -->
+            <div class="p-section">
+                <div class="cp-label">Cp-Verteilung</div>
+                <div id="cp-chart-wrap">
+                    <svg id="cp-svg" height="90" viewBox="0 0 240 90" xmlns="http://www.w3.org/2000/svg">
+                        <text x="120" y="45" text-anchor="middle" fill="#445566"
+                              font-size="10" font-family="JetBrains Mono">Noch keine Daten</text>
+                    </svg>
+                </div>
+            </div>
+        </div>
+
+        <div class="p-section" style="margin-top:14px">
+            <div class="p-label">Darstellung</div>
+            <select id="result-field" class="p-input">
+                <option value="mesh">Netz (Mesh only)</option>
+                <option value="pressure">Druck (p)</option>
+                <option value="speed">Geschwindigkeit (|U|)</option>
+                <option value="vorticity">Vorticity (ωz)</option>
+                <option value="turb_k">Turbulente Energie (k)</option>
+            </select>
+            <div class="p-checkbox-row" style="margin-top:6px">
+                <input type="checkbox" id="show-vectors" style="accent-color:var(--accent)">
+                <label for="show-vectors">Geschwindigkeitsvektoren</label>
+            </div>
+            <div class="p-checkbox-row" style="margin-top:4px">
+                <input type="checkbox" id="show-streamlines-2d" style="accent-color:var(--mint)">
+                <label for="show-streamlines-2d">Stromlinien</label>
+            </div>
+            <div id="sl2d-opts" style="display:none;margin-left:18px;margin-top:3px">
+                <div class="p-row" style="margin-bottom:3px">
+                    <label style="font-size:10px">Anzahl</label>
+                    <input type="number" id="sl2d-nseeds" class="p-input" value="28" min="5" max="120" step="5" style="width:52px">
+                </div>
+                <div class="p-checkbox-row">
+                    <input type="checkbox" id="sl2d-no-bg" style="accent-color:var(--mint)">
+                    <label for="sl2d-no-bg" style="font-size:10px">Ohne Hintergrund</label>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 3D params -->
+    <div id="params-3d">
+        <div class="p-section">
+            <div class="p-label">Modell laden</div>
+            <button class="upload-btn" id="btn-upload-glb">GLB / STL Upload</button>
+            <input type="file" id="input-glb" accept=".glb,.stl" style="display:none">
+            <div id="glb-info"></div>
+            <div class="p-row">
+                <label>Skalierung</label>
+                <input type="number" id="glb-scale" class="p-input" value="1" min="0.001" max="1000" step="0.1">
+                <button id="btn-apply-scale" style="padding:3px 7px;border-radius:3px;border:1px solid var(--border-hi);background:var(--accent-dim);color:var(--accent);cursor:pointer;font-size:10px" title="Scale neu anwenden">↻</button>
+            </div>
+        </div>
+
+        <div class="p-section">
+            <div class="p-label">Wind</div>
+            <div class="p-row">
+                <label>Geschwindigkeit [m/s]</label>
+                <input type="number" id="wind-speed-3d" class="p-input" value="20" min="1" max="200" step="5">
+            </div>
+            <div class="p-row">
+                <label>Richtung [°]</label>
+                <input type="number" id="wind-angle-3d" class="p-input" value="0" min="-180" max="180" step="15">
+            </div>
+            <div class="p-row">
+                <label>Gebäudehöhe [m]</label>
+                <input type="number" id="building-height" class="p-input" value="40" min="5" max="500" step="5">
+            </div>
+            <div class="p-row">
+                <label>Rauhigkeit z₀ [m]</label>
+                <input type="number" id="roughness" class="p-input" value="0.1" min="0.001" max="2" step="0.05">
+            </div>
+        </div>
+
+        <div class="p-section">
+            <div class="p-label">Mesh</div>
+            <label style="font-size:11px;color:var(--text-dim);display:block;margin-bottom:3px">Berechnungsraum: <span id="domain-val-3d" style="color:var(--text-mono)">3×</span></label>
+            <input type="range" id="domain-size-3d" class="p-slider" min="2" max="8" value="3" step="1"
+                oninput="document.getElementById('domain-val-3d').textContent=this.value+'×'">
+            <div class="p-slider-row"><span>eng</span><span>weit</span></div>
+        </div>
+
+        <button class="run-btn" id="btn-run-3d">▶ 3D OpenFOAM Berechnung</button>
+        <button id="btn-clear-3d" style="width:100%;margin-top:4px;padding:4px;background:none;border:1px solid var(--border);border-radius:4px;color:var(--text-dim);cursor:pointer;font-size:11px;font-family:var(--font-ui);display:none" title="Ergebnisse und Ansicht zurücksetzen">× Ergebnisse leeren</button>
+
+        <!-- Schnittebenen — sichtbar sobald Modell geladen -->
+        <div id="slices-3d-controls" style="display:none">
+            <div class="p-section" style="margin-top:10px">
+                <div class="p-label">Schnittebenen</div>
+
+                <!-- Horizontal (z) -->
+                <div class="p-row" style="margin-bottom:2px">
+                    <input type="checkbox" id="show-hz-plane" checked
+                        style="accent-color:#3d9eff;cursor:pointer">
+                    <label for="show-hz-plane" style="flex:1;color:#3d9eff;font-weight:600">
+                        Horizontal z =</label>
+                    <span id="sl3d-hz-val" class="p-val" style="color:#3d9eff">—</span>
+                </div>
+                <input type="range" id="sl3d-hz" class="p-slider" min="0" max="1" step="0.01" value="0.5">
+
+                <!-- Vertikal (y) -->
+                <div class="p-row" style="margin-bottom:2px;margin-top:8px">
+                    <input type="checkbox" id="show-vt-plane" checked
+                        style="accent-color:#ffaa44;cursor:pointer">
+                    <label for="show-vt-plane" style="flex:1;color:#ffaa44;font-weight:600">
+                        Vertikal y =</label>
+                    <span id="sl3d-vt-val" class="p-val" style="color:#ffaa44">—</span>
+                </div>
+                <input type="range" id="sl3d-vt" class="p-slider" min="0" max="1" step="0.01" value="0.5"
+                    style="accent-color:#ffaa44">
+            </div>
+
+            <!-- Ergebnis-Controls — erst nach Solve sichtbar -->
+            <div id="result-controls-3d" style="display:none">
+                <div class="p-section">
+                    <div class="p-label">Ergebnis-Feld</div>
+                    <select id="result-field-3d" class="p-input">
+                        <option value="pressure">Druck (p)</option>
+                        <option value="speed">Geschwindigkeit (|U|)</option>
+                        <option value="turb_k">Turbulenz k</option>
+                    </select>
+                </div>
+                <div class="p-section">
+                    <div class="p-label">Einblendungen</div>
+                    <div class="p-checkbox-row">
+                        <input type="checkbox" id="show-vectors-3d" style="accent-color:var(--accent)">
+                        <label for="show-vectors-3d">Vektoren</label>
+                    </div>
+                    <div class="p-checkbox-row">
+                        <input type="checkbox" id="show-streamlines-3d" style="accent-color:var(--mint)">
+                        <label for="show-streamlines-3d">Stromlinien</label>
+                    </div>
+                    <div id="sl3d-stream-opts" style="display:none;margin-left:18px">
+                        <div class="p-row" style="margin-bottom:2px">
+                            <label style="font-size:10px">Höhenbereich</label>
+                        </div>
+                        <input type="range" id="sl3d-szmin" class="p-slider" min="0" max="100" value="0"
+                            style="accent-color:var(--mint)">
+                        <input type="range" id="sl3d-szmax" class="p-slider" min="0" max="100" value="100"
+                            style="accent-color:var(--mint)">
+                        <div class="p-row">
+                            <label style="font-size:10px">Seeds</label>
+                            <input type="number" id="sl3d-seeds" class="p-input" value="30" min="5" max="100" step="5">
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+</div>
+
+<!-- ─── Status bar ────────────────────────────────────────────── -->
+<div id="statusbar">
+    <span id="statusbar-msg" class="status-msg">Bereit</span>
+    <span id="statusbar-progress" style="display:none"></span>
+    <span id="statusbar-stats" style="display:none;margin-left:auto;
+          font-family:var(--font-mono);font-size:10px;color:var(--text-dim);
+          padding-left:10px;border-left:1px solid var(--border)"></span>
+</div>
+
+</div><!-- #app -->
+
+<script type="importmap">
+{
+    "imports": {
+        "three": "../three/build/three.module.js",
+        "three/addons/": "../three/examples/jsm/"
+    }
+}
+</script>
+<script type="module" src="./app.js"></script>
+</body>
+</html>

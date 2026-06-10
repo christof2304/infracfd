@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.env
+uploads/
+/tmp/
+cfd_*/
+cfd3d_*/
+*.log
+.DS_Store
