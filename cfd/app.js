@@ -669,6 +669,7 @@ class CFDApp {
                 body: JSON.stringify(body)
             });
             if (!r.ok) throw new Error(await r.text());
+            this._solveResult = await r.json();
         } catch (e) {
             this._appendLog(`Fehler: ${e.message}`);
             this._setStatus('Fehler', 'error');
