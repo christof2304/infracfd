@@ -2067,8 +2067,16 @@ def parse_cfd_results_3d(case_dir):
     time_dirs.sort(key=lambda d: float(d.name))
     latest = time_dirs[-1]
 
-    # Parse cell centers (from postProcess -func writeCellCentres)
-    cell_centers = _parse_of_vector_field(latest / "C")
+    # Parse cell centers — OpenFOAM 2406+ writes to postProcessing/writeCellCentres/<time>/C
+    c_path = latest / "C"
+    if not c_path.exists():
+        pp_wcc = case_dir / "postProcessing" / "writeCellCentres"
+        if pp_wcc.exists():
+            pp_times = sorted([d for d in pp_wcc.iterdir() if d.is_dir()],
+                              key=lambda d: float(d.name) if d.name.replace('.','',1).isdigit() else 0)
+            if pp_times:
+                c_path = pp_times[-1] / "C"
+    cell_centers = _parse_of_vector_field(c_path)
     if not cell_centers:
         return None
 
@@ -2143,8 +2151,16 @@ def extract_slice(case_dir, plane="z", value=0, field="pressure", tolerance=None
     time_dirs.sort(key=lambda d: float(d.name))
     latest = time_dirs[-1]
 
-    # Parse cell centers
-    cell_centers = _parse_of_vector_field(latest / "C")
+    # Parse cell centers — OpenFOAM 2406+ writes to postProcessing/writeCellCentres/<time>/C
+    c_path = latest / "C"
+    if not c_path.exists():
+        pp_wcc = case_dir / "postProcessing" / "writeCellCentres"
+        if pp_wcc.exists():
+            pp_times = sorted([d for d in pp_wcc.iterdir() if d.is_dir()],
+                              key=lambda d: float(d.name) if d.name.replace('.','',1).isdigit() else 0)
+            if pp_times:
+                c_path = pp_times[-1] / "C"
+    cell_centers = _parse_of_vector_field(c_path)
     if not cell_centers:
         return None
 
