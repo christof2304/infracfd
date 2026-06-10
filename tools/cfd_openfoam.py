@@ -558,7 +558,7 @@ def run_openfoam(case_dir, polygon, mesh_size=0.2, far_field_factor=15,
     # Step 2-4: Run in WSL
     print("  [2/4] Converting mesh + running simpleFoam in WSL...")
     of_script = f"""#!/bin/bash
-source /usr/lib/openfoam/openfoam2406/etc/bashrc 2>/dev/null
+for _of in /usr/lib/openfoam/openfoam2412/etc/bashrc /usr/lib/openfoam/openfoam2406/etc/bashrc /opt/openfoam*/etc/bashrc; do [ -f "$_of" ] && source "$_of" && break; done
 cd "{wsl_case}"
 
 echo "=== gmshToFoam ==="
@@ -1476,7 +1476,7 @@ def run_openfoam_3d_stl(case_dir, n_procs=4):
     wsl_case = str(case_dir).replace("C:\\", "/mnt/c/").replace("\\", "/")
 
     of_script = f"""#!/bin/bash
-source /usr/lib/openfoam/openfoam2406/etc/bashrc 2>/dev/null
+for _of in /usr/lib/openfoam/openfoam2412/etc/bashrc /usr/lib/openfoam/openfoam2406/etc/bashrc /opt/openfoam*/etc/bashrc; do [ -f "$_of" ] && source "$_of" && break; done
 cd "{wsl_case}"
 
 echo "=== blockMesh ==="
@@ -1567,12 +1567,13 @@ def create_openfoam_case_3d(footprint, height, wind_speed=10.0, wind_angle=0.0,
     flow_x = math.cos(rad)
     flow_y = math.sin(rad)
 
-    # Turbulence parameters — ABL log-law based (z0-dependent)
+    # Turbulence parameters — ABL log-law based, kOmegaSST
     kappa = 0.41
+    Cmu = 0.09
     u_star = wind_speed * kappa / math.log(max(zref, 1.0) / max(z0, 0.001))
-    k_inlet = u_star ** 2 / math.sqrt(0.09)
-    epsilon_inlet = u_star ** 3 / (kappa * max(zref, 1.0))
-    nut_inlet = 0.09 * k_inlet ** 2 / max(epsilon_inlet, 1e-10)
+    k_inlet = u_star ** 2 / math.sqrt(Cmu)
+    omega_inlet = u_star / (math.sqrt(Cmu) * kappa * max(zref, 1.0))
+    nut_inlet = k_inlet / max(omega_inlet, 1e-10)
 
     # Footprint dimensions for force coefficients (all buildings)
     if buildings:
@@ -1712,27 +1713,27 @@ boundaryField
 }}
 """)
 
-    # ── 0/epsilon ──
-    _write_of_file(case_dir / "0" / "epsilon", "volScalarField", "epsilon", f"""
-dimensions      [0 2 -3 0 0 0 0];
-internalField   uniform {epsilon_inlet};
+    # ── 0/omega ──
+    _write_of_file(case_dir / "0" / "omega", "volScalarField", "omega", f"""
+dimensions      [0 0 -1 0 0 0 0];
+internalField   uniform {omega_inlet};
 boundaryField
 {{
     inlet
     {{
-        type            atmBoundaryLayerInletEpsilon;
-        #include        "include/ABLConditions"
+        type            fixedValue;
+        value           uniform {omega_inlet};
     }}
     outlet
     {{
         type            inletOutlet;
-        inletValue      uniform {epsilon_inlet};
+        inletValue      uniform {omega_inlet};
         value           $internalField;
     }}
     ground
     {{
-        type            epsilonWallFunction;
-        value           uniform {epsilon_inlet};
+        type            omegaWallFunction;
+        value           uniform {omega_inlet};
     }}
     top
     {{
@@ -1744,8 +1745,8 @@ boundaryField
     }}
     building
     {{
-        type            epsilonWallFunction;
-        value           uniform {epsilon_inlet};
+        type            omegaWallFunction;
+        value           uniform {omega_inlet};
     }}
 }}
 """)
@@ -1768,7 +1769,7 @@ boundaryField
     }}
     ground
     {{
-        type            nutUSpaldingWallFunction;
+        type            nutkWallFunction;
         value           uniform 0;
     }}
     top
@@ -1783,7 +1784,7 @@ boundaryField
     }}
     building
     {{
-        type            nutUSpaldingWallFunction;
+        type            nutkWallFunction;
         value           uniform 0;
     }}
 }}
@@ -1813,7 +1814,7 @@ FoamFile
 simulationType  RAS;
 RAS
 {
-    RASModel        kEpsilon;
+    RASModel        kOmegaSST;
     turbulence      on;
     printCoeffs     on;
 }
@@ -1836,8 +1837,8 @@ stopAt          endTime;
 endTime         {n_iterations};
 deltaT          1;
 writeControl    timeStep;
-writeInterval   {n_iterations};
-purgeWrite      1;
+writeInterval   {max(50, n_iterations // 5)};
+purgeWrite      2;
 writeFormat     ascii;
 writePrecision  8;
 writeCompression off;
@@ -1882,12 +1883,13 @@ divSchemes
     default             none;
     div(phi,U)          bounded Gauss linearUpwind grad(U);
     div(phi,k)          bounded Gauss upwind;
-    div(phi,epsilon)    bounded Gauss upwind;
+    div(phi,omega)      bounded Gauss upwind;
     div((nuEff*dev2(T(grad(U))))) Gauss linear;
 }
 laplacianSchemes { default Gauss linear corrected; }
 interpolationSchemes { default linear; }
 snGradSchemes { default corrected; }
+wallDist { method meshWave; }
 """)
 
     _write_of_file(case_dir / "system" / "fvSolution", None, None, f"""
@@ -1903,19 +1905,20 @@ solvers
     p   {{ solver GAMG; smoother GaussSeidel; tolerance 1e-06; relTol 0.01; }}
     U   {{ solver smoothSolver; smoother GaussSeidel; tolerance 1e-07; relTol 0.01; }}
     k   {{ solver smoothSolver; smoother GaussSeidel; tolerance 1e-07; relTol 0.01; }}
-    epsilon {{ solver smoothSolver; smoother GaussSeidel; tolerance 1e-07; relTol 0.01; }}
+    omega {{ solver smoothSolver; smoother GaussSeidel; tolerance 1e-07; relTol 0.01; }}
 }}
 SIMPLE
 {{
-    nNonOrthogonalCorrectors 1;
+    nNonOrthogonalCorrectors 2;
+    consistent      yes;
     pRefCell 0;
     pRefValue 0;
-    residualControl {{ p 1e-4; U 1e-4; k 1e-4; epsilon 1e-4; }}
+    residualControl {{ p 1e-4; U 1e-4; k 1e-4; omega 1e-4; }}
 }}
 relaxationFactors
 {{
     fields {{ p 0.3; }}
-    equations {{ U 0.7; k 0.7; epsilon 0.7; }}
+    equations {{ U 0.5; k 0.5; omega 0.5; }}
 }}
 """)
 
@@ -1971,7 +1974,7 @@ def run_openfoam_3d(case_dir, footprint, height, mesh_size=None,
     use_parallel = n_procs > 1
     print(f"  [2/4] Converting mesh + running simpleFoam in WSL ({n_procs} procs)...")
     of_script = f"""#!/bin/bash
-source /usr/lib/openfoam/openfoam2406/etc/bashrc 2>/dev/null
+for _of in /usr/lib/openfoam/openfoam2412/etc/bashrc /usr/lib/openfoam/openfoam2406/etc/bashrc /opt/openfoam*/etc/bashrc; do [ -f "$_of" ] && source "$_of" && break; done
 cd "{wsl_case}"
 
 echo "=== gmshToFoam ==="
@@ -2520,7 +2523,7 @@ seedSampleSet
     # Run postProcess
     wsl_case = str(case_dir).replace("C:\\", "/mnt/c/").replace("\\", "/")
     script = f"""#!/bin/bash
-source /usr/lib/openfoam/openfoam2406/etc/bashrc 2>/dev/null
+for _of in /usr/lib/openfoam/openfoam2412/etc/bashrc /usr/lib/openfoam/openfoam2406/etc/bashrc /opt/openfoam*/etc/bashrc; do [ -f "$_of" ] && source "$_of" && break; done
 cd "{wsl_case}"
 postProcess -func streamLineDict -latestTime 2>&1 | tail -5
 echo "STREAMLINE_DONE"

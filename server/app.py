@@ -260,7 +260,7 @@ def cfd_solve3d(body: dict):
     z0            = body.get("z0", 0.1)
     mesh_size     = body.get("meshSize", None)
     n_iterations  = body.get("nIterations", 500)
-    n_procs       = body.get("nProcs", 4)
+    n_procs       = body.get("nProcs", 1)
     domain_factor = body.get("domainFactor", 3)
 
     max_height = max(b["height"] for b in buildings) if buildings else height
