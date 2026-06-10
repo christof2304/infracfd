@@ -1,5 +1,5 @@
 """
-infraFEM-CFD — standalone FastAPI server for browser-based CFD wind analysis.
+infraCFD — standalone FastAPI server for browser-based CFD wind analysis.
 
 Requirements: Python 3.10+, OpenFOAM 2406/2412 via WSL (Ubuntu), Gmsh
 
@@ -24,7 +24,7 @@ from fastapi.responses import StreamingResponse, RedirectResponse
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-app = FastAPI(title="infraFEM-CFD", version="0.1.0")
+app = FastAPI(title="infraCFD", version="0.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 # Static files

@@ -1,13 +1,13 @@
-# infraFEM-CFD
+# infraCFD
 
-Browser-based wind analysis for civil engineering structures, powered by OpenFOAM.
+**[infracfd.app](https://infracfd.app)** — browser-based wind analysis for civil engineering structures, powered by OpenFOAM.
 
 **2D** — cross-section aerodynamics (bridge decks, building profiles)  
 **3D** — building aerodynamics (single buildings or entire city blocks)
 
 Draw a geometry in the browser, hit run, get pressure fields, velocity slices and streamlines — no pre-processing scripts, no local CFD installation beyond OpenFOAM in WSL.
 
-> Part of [geobim.app](https://geobim.app) / infraFEM  
+> By [geobim.app](https://geobim.app)  
 > Cross-sections and 3D geometries derived from the [SOFiSTiK Dolfyn](https://www.sofistik.com) CFD example library.
 
 ---
@@ -67,7 +67,7 @@ Then open **http://localhost:8000/cfd/**
 ### 2D Cross-Section
 - Draw any polygon directly in the browser
 - Automatic Gmsh mesh with boundary layer refinement
-- Steady RANS or transient (LES-like) solve
+- Steady RANS or transient solve
 - Pressure, velocity, vorticity, turbulent kinetic energy
 - Client-side RK4 streamlines
 - Force coefficients Cd / Cl
