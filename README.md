@@ -112,3 +112,5 @@ three/          Three.js (bundled, no npm required)
 ## License
 
 MIT — see [LICENSE](LICENSE)
+
+> **Note on dependencies:** Gmsh (used for meshing) is GPL-licensed and OpenFOAM is GPL-licensed. Both are invoked as external tools/processes, not embedded. The infraCFD source code itself is MIT.
