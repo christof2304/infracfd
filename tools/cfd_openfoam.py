@@ -237,7 +237,7 @@ RAS
         solver_app = "pimpleFoam"
         delta_t = dt
         end_t = end_time
-        write_int = write_interval
+        write_int = max(1, int(round(0.1 / dt)))  # write every ~0.1 s regardless of dt
         purge = 0  # keep all time steps for animation
     else:
         solver_app = "simpleFoam"
@@ -335,6 +335,7 @@ solvers
     kFinal { $k; relTol 0; }
     epsilon { solver smoothSolver; smoother GaussSeidel; tolerance 1e-07; relTol 0.01; }
     epsilonFinal { $epsilon; relTol 0; }
+    Phi { solver PCG; preconditioner DIC; tolerance 1e-06; relTol 0.01; }
 }
 PIMPLE
 {
@@ -364,6 +365,7 @@ solvers
     U   { solver smoothSolver; smoother GaussSeidel; tolerance 1e-07; relTol 0.01; }
     k   { solver smoothSolver; smoother GaussSeidel; tolerance 1e-07; relTol 0.01; }
     epsilon { solver smoothSolver; smoother GaussSeidel; tolerance 1e-07; relTol 0.01; }
+    Phi { solver PCG; preconditioner DIC; tolerance 1e-06; relTol 0.01; }
 }
 SIMPLE
 {
@@ -419,9 +421,153 @@ def _write_of_file(path, class_name, object_name, content):
             f.write(content)
 
 
+def _omesh_to_msh(polygon, msh_path, wind_speed, far_field_factor):
+    """Generate a structured O-grid .msh for OpenFOAM via subprocess."""
+    script = f"""
+import sys, json, math
+sys.path.insert(0, r'{str(Path(__file__).resolve().parent.parent)}')
+from tools.cfd_mesh import _cosine_resample
+import gmsh
+
+polygon = {json.dumps(polygon)}
+wind_speed = {wind_speed}
+far_field_factor = {far_field_factor}
+nu = 1.5e-5
+
+xs = [p[0] for p in polygon]
+ys = [p[1] for p in polygon]
+cx = (max(xs) + min(xs)) / 2
+cy = (max(ys) + min(ys)) / 2
+char_dim = max(max(xs) - min(xs), max(ys) - min(ys))
+far_r = char_dim * far_field_factor
+
+Re = max(wind_speed * char_dim / nu, 1e4)
+Cf = 0.074 / Re ** 0.2
+u_tau = wind_speed * math.sqrt(max(Cf / 2.0, 1e-10))
+first_layer = max(5e-6, 50.0 * nu / u_tau)
+
+r_g = 1.15
+N_r = int(math.ceil(math.log(far_r * (r_g - 1) / first_layer + 1) / math.log(r_g)))
+N_r = max(40, min(N_r, 120))
+N_s = 60
+
+n = len(polygon)
+le_idx = min(range(n), key=lambda i: polygon[i][0])
+te_idx = max(range(n), key=lambda i: polygon[i][0])
+le_pt = [polygon[le_idx][0], polygon[le_idx][1]]
+te_pt = [polygon[te_idx][0], 0.0]
+
+def walk(start, end, step):
+    pts, i = [], start
+    while i != end:
+        pts.append(list(polygon[i]))
+        i = (i + step) % n
+    pts.append(list(polygon[end]))
+    return pts
+
+fwd = walk(le_idx, te_idx,  1)
+bwd = walk(le_idx, te_idx, -1)
+if sum(p[1] for p in fwd) >= sum(p[1] for p in bwd):
+    upper_raw, lower_raw = fwd, list(reversed(bwd))
+else:
+    upper_raw, lower_raw = bwd, list(reversed(fwd))
+
+upper_raw[0] = le_pt[:]
+upper_raw[-1] = te_pt[:]
+lower_raw[0] = te_pt[:]
+lower_raw[-1] = le_pt[:]
+
+upper_pts = _cosine_resample(upper_raw, N_s)
+lower_pts = _cosine_resample(lower_raw, N_s)
+
+def to_ff(pt):
+    dx, dy = pt[0] - cx, pt[1] - cy
+    d = math.sqrt(dx*dx + dy*dy)
+    if d < 1e-10:
+        return [cx + far_r, cy]
+    return [cx + dx * far_r / d, cy + dy * far_r / d]
+
+upper_ff = [to_ff(p) for p in upper_pts]
+lower_ff = [to_ff(p) for p in lower_pts]
+
+gmsh.initialize()
+gmsh.option.setNumber("General.Verbosity", 0)
+gmsh.model.add("omesh")
+
+def gpt(x, y):
+    return gmsh.model.geo.addPoint(x, y, 0, 1.0)
+
+ut = [gpt(*p) for p in upper_pts]
+lt_int = [gpt(*p) for p in lower_pts[1:-1]]
+lt = [ut[N_s]] + lt_int + [ut[0]]
+uft = [gpt(*p) for p in upper_ff]
+lft_int = [gpt(*p) for p in lower_ff[1:-1]]
+lft = [uft[N_s]] + lft_int + [uft[0]]
+
+le_rad = gmsh.model.geo.addLine(ut[0],   uft[0])
+te_rad = gmsh.model.geo.addLine(ut[N_s], uft[N_s])
+u_spl  = gmsh.model.geo.addSpline(ut)
+l_spl  = gmsh.model.geo.addSpline(lt)
+uf_spl = gmsh.model.geo.addSpline(uft)
+lf_spl = gmsh.model.geo.addSpline(lft)
+
+uloop = gmsh.model.geo.addCurveLoop([u_spl, te_rad, -uf_spl, -le_rad])
+usurf = gmsh.model.geo.addPlaneSurface([uloop])
+lloop = gmsh.model.geo.addCurveLoop([l_spl, le_rad, -lf_spl, -te_rad])
+lsurf = gmsh.model.geo.addPlaneSurface([lloop])
+
+# Extrude BEFORE synchronize so we only need ONE synchronize() call.
+# Two synchronize() calls would reset transfinite attributes set between them.
+# Lateral ordering follows the CurveLoop order:
+#   uloop=[u_spl, te_rad, -uf_spl, -le_rad] -> ext[2]=lat_u_spl [3]=lat_te_rad [4]=lat_uf_spl [5]=lat_le_rad
+#   lloop=[l_spl, le_rad, -lf_spl, -te_rad] -> ext[8]=lat_l_spl [9]=lat_le_rad [10]=lat_lf_spl [11]=lat_te_rad
+#   ext[3,5,9,11] = TE/LE radial laterals (shared between upper and lower -> internal)
+ext = gmsh.model.geo.extrude(
+    [(2, usurf), (2, lsurf)], 0, 0, 1.0,
+    numElements=[1], recombine=True
+)
+
+# Single synchronize: transfers all geometry (surfaces + extruded volumes) to Gmsh model
+gmsh.model.geo.synchronize()
+
+# Set ALL transfinite/recombine attributes after the ONE synchronize
+gmsh.model.mesh.setTransfiniteCurve(u_spl,  N_s + 1)
+gmsh.model.mesh.setTransfiniteCurve(l_spl,  N_s + 1)
+gmsh.model.mesh.setTransfiniteCurve(uf_spl, N_s + 1)
+gmsh.model.mesh.setTransfiniteCurve(lf_spl, N_s + 1)
+gmsh.model.mesh.setTransfiniteCurve(le_rad, N_r + 1, "Progression", r_g)
+gmsh.model.mesh.setTransfiniteCurve(te_rad, N_r + 1, "Progression", r_g)
+gmsh.model.mesh.setTransfiniteSurface(usurf, "Left", [ut[0], ut[N_s], uft[N_s], uft[0]])
+gmsh.model.mesh.setTransfiniteSurface(lsurf, "Left", [lt[0], lt[N_s], lft[N_s], lft[0]])
+gmsh.model.mesh.setRecombine(2, usurf)
+gmsh.model.mesh.setRecombine(2, lsurf)
+
+# Physical groups using explicit ext indices (set before generate)
+gmsh.model.removePhysicalGroups()
+gmsh.model.addPhysicalGroup(3, [ext[1][1], ext[7][1]],               tag=10, name="internal")
+gmsh.model.addPhysicalGroup(2, [ext[2][1], ext[8][1]],               tag=1,  name="section")
+gmsh.model.addPhysicalGroup(2, [ext[4][1], ext[10][1]],              tag=2,  name="farfield")
+gmsh.model.addPhysicalGroup(2, [usurf, ext[0][1], lsurf, ext[6][1]], tag=3,  name="frontAndBack")
+
+gmsh.model.mesh.generate(3)
+gmsh.option.setNumber("Mesh.MshFileVersion", 2.2)
+gmsh.write(r'{msh_path}')
+print("MSH_OK")
+gmsh.finalize()
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True, text=True, timeout=120,
+    )
+    if "MSH_OK" not in result.stdout:
+        raise RuntimeError(f"Structured Gmsh export failed: {result.stderr[:500]}")
+
+
 def generate_gmsh_msh(polygon, msh_path, mesh_size=0.2, far_field_factor=15,
-                      bl_layers=4, bl_ratio=1.4):
+                      bl_layers=4, bl_ratio=1.4, structured=False, wind_speed=20.0):
     """Generate a Gmsh .msh file for OpenFOAM (run in subprocess due to signal issues)."""
+    if structured:
+        return _omesh_to_msh(polygon, msh_path, wind_speed, far_field_factor)
     script = f"""
 import sys, json
 sys.path.insert(0, r'{str(Path(__file__).resolve().parent.parent)}')
@@ -440,6 +586,20 @@ gmsh.option.setNumber("General.Verbosity", 0)
 gmsh.model.add("cfd")
 
 import math
+
+# Densify long edges so BL quads can anchor on every segment.
+# Without this, a coarse polygon (e.g. rectangle) has no intermediate
+# points along edges → Gmsh BoundaryLayer field fails or leaves gaps.
+_dense = []
+for i in range(len(polygon)):
+    p1, p2 = polygon[i], polygon[(i+1) % len(polygon)]
+    edge = math.hypot(p2[0]-p1[0], p2[1]-p1[1])
+    n_seg = max(1, int(math.ceil(edge / ({mesh_size} * 3))))
+    for j in range(n_seg):
+        t = j / n_seg
+        _dense.append([p1[0]+t*(p2[0]-p1[0]), p1[1]+t*(p2[1]-p1[1])])
+polygon = _dense
+
 cx = sum(p[0] for p in polygon) / len(polygon)
 cy = sum(p[1] for p in polygon) / len(polygon)
 xs = [p[0] for p in polygon]
@@ -549,7 +709,8 @@ gmsh.finalize()
 
 
 def run_openfoam(case_dir, polygon, mesh_size=0.2, far_field_factor=15,
-                 bl_layers=5, bl_ratio=1.3, n_procs=1):
+                 bl_layers=5, bl_ratio=1.3, n_procs=1, timeout=None,
+                 structured=False, wind_speed=20.0):
     """
     Run OpenFOAM simpleFoam via WSL.
 
@@ -586,7 +747,67 @@ method          scotch;
     # Step 1: Generate Gmsh .msh (with boundary layer)
     print(f"  [1/4] Generating Gmsh mesh (BL: {bl_layers} layers, ratio {bl_ratio})...")
     generate_gmsh_msh(polygon, msh_path, mesh_size, far_field_factor,
-                      bl_layers=bl_layers, bl_ratio=bl_ratio)
+                      bl_layers=bl_layers, bl_ratio=bl_ratio,
+                      structured=structured, wind_speed=wind_speed)
+
+    # For structured O-grid meshes, overwrite solver settings with more robust options.
+    # The O-grid topology creates high skewness (>11) and non-orthogonality (>70°) near
+    # the sharp TE, which causes GAMG to diverge. PCG+DIC has no coarse grid hierarchy
+    # and handles skewed meshes better. Limited correction prevents over-correction in
+    # highly skewed cells.
+    if structured:
+        _write_of_file(case_dir / "system" / "fvSchemes", None, None, """
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      fvSchemes;
+}
+ddtSchemes      { default steadyState; }
+gradSchemes     { default cellLimited Gauss linear 1; }
+divSchemes
+{
+    default             none;
+    div(phi,U)          bounded Gauss linearUpwind grad(U);
+    div(phi,k)          bounded Gauss upwind;
+    div(phi,epsilon)    bounded Gauss upwind;
+    div((nuEff*dev2(T(grad(U))))) Gauss linear;
+}
+laplacianSchemes { default Gauss linear limited 0.5; }
+interpolationSchemes { default skewCorrected linear; }
+snGradSchemes { default limited 0.5; }
+""")
+        _write_of_file(case_dir / "system" / "fvSolution", None, None, """
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      fvSolution;
+}
+solvers
+{
+    p   { solver PCG; preconditioner DIC; tolerance 1e-06; relTol 0.01; }
+    pFinal { $p; relTol 0; }
+    U   { solver PBiCGStab; preconditioner DILU; tolerance 1e-07; relTol 0.01; }
+    k   { solver PBiCGStab; preconditioner DILU; tolerance 1e-07; relTol 0.01; }
+    epsilon { solver PBiCGStab; preconditioner DILU; tolerance 1e-07; relTol 0.01; }
+    Phi { solver PCG; preconditioner DIC; tolerance 1e-06; relTol 0.01; }
+}
+SIMPLE
+{
+    nNonOrthogonalCorrectors 10;
+    pRefCell 0;
+    pRefValue 0;
+    residualControl { p 1e-4; U 1e-4; k 1e-4; epsilon 1e-4; }
+}
+relaxationFactors
+{
+    fields    { p 0.1; }
+    equations { U 0.3; k 0.3; epsilon 0.3; }
+}
+""")
 
     of_case = _of_path(case_dir)
 
@@ -618,8 +839,8 @@ cd constant/polyMesh
 python3 -c "
 import re
 with open('boundary','r') as f: txt=f.read()
-txt = re.sub(r'(section[^{{]*{{[^}}]*type\s+)\w+', r'\g<1>wall', txt)
-txt = re.sub(r'(frontAndBack[^{{]*{{[^}}]*type\s+)\w+', r'\g<1>empty', txt)
+txt = re.sub(r'(section[^{{]*{{[^}}]*type\\s+)\\w+', r'\\g<1>wall', txt)
+txt = re.sub(r'(frontAndBack[^{{]*{{[^}}]*type\\s+)\\w+', r'\\g<1>empty', txt)
 with open('boundary','w') as f: f.write(txt)
 print('Boundary: section=wall, frontAndBack=empty, farfield=patch')
 " 2>&1
@@ -628,13 +849,16 @@ cd "{of_case}"
 echo "=== renumberMesh ==="
 renumberMesh -overwrite 2>&1 | tail -3 || true
 
+echo "=== potentialFoam ==="
+potentialFoam -writep 2>&1 | tail -5 || true
+
 echo "=== Starting solver ==="
 SOLVER=$(grep "application" system/controlDict | awk '{{print $2}}' | tr -d ';\\r\\n')
 echo "Solver: $SOLVER"
 {run_block}
 
 echo "=== Post-processing: vorticity ==="
-postProcess -func vorticity -latestTime 2>&1 | tail -3 || true
+postProcess -func vorticity 2>&1 | tail -5 || true
 
 echo "=== DONE ==="
 """
@@ -642,8 +866,20 @@ echo "=== DONE ==="
     with open(script_path, "w", newline="\n") as f:
         f.write(of_script)
 
+    # Auto-scale timeout: for transient runs estimate ~0.4s per time step + 60s overhead.
+    if timeout is None:
+        try:
+            ctrl = (case_dir / "system" / "controlDict").read_text()
+            import re as _re
+            end_t = float(_re.search(r'endTime\s+([\d.]+)', ctrl).group(1))
+            dt_v  = float(_re.search(r'deltaT\s+([\d.]+)', ctrl).group(1))
+            is_tr = 'pimpleFoam' in ctrl
+            timeout = int(max(300, (end_t / dt_v) * 0.4 + 60)) if is_tr else 300
+        except Exception:
+            timeout = 300
+
     try:
-        result = _run_of_script(script_path, case_dir, timeout=300)
+        result = _run_of_script(script_path, case_dir, timeout=timeout)
         log = result.stdout.decode("utf-8", errors="replace")
         log += result.stderr.decode("utf-8", errors="replace")
         success = "=== DONE ===" in log and "FOAM FATAL" not in log
@@ -1228,8 +1464,9 @@ gmsh.finalize()
 
 
 def prepare_stl_case(glb_or_stl_path, case_dir, scale=1.0, wind_speed=10.0,
-                      z0=0.1, mesh_size=None, domain_factor=3, n_procs=4,
-                      n_iterations=500, rot_x=0, rot_y=0, rot_z=0):
+                      z0=0.1, mesh_size=None, domain_factor=3, n_procs=6,
+                      n_iterations=500, rot_x=0, rot_y=0, rot_z=0,
+                      transient=False, end_time=5.0, dt=0.05):
     """Prepare a complete OpenFOAM case from a GLB/STL file using snappyHexMesh.
 
     Pipeline: GLB→STL → blockMesh (background) → snappyHexMesh → simpleFoam
@@ -1311,6 +1548,7 @@ def prepare_stl_case(glb_or_stl_path, case_dir, scale=1.0, wind_speed=10.0,
                     [bb[1][0], bb[1][1]], [bb[0][0], bb[1][1]]],
         height=H, wind_speed=wind_speed, z0=z0,
         output_dir=str(case_dir), n_iterations=n_iterations, n_procs=n_procs,
+        transient=transient, end_time=end_time, dt=dt,
     )
 
     # ── blockMeshDict ──
@@ -1513,7 +1751,7 @@ mergeTolerance 1e-6;
     }
 
 
-def run_openfoam_3d_stl(case_dir, n_procs=4):
+def run_openfoam_3d_stl(case_dir, n_procs=6, transient=False):
     """Run OpenFOAM with snappyHexMesh for STL-based geometry."""
     case_dir = Path(case_dir).resolve()
     of_case = _of_path(case_dir)
@@ -1548,10 +1786,11 @@ renumberMesh -overwrite 2>&1 | tail -3 || true
 echo "=== simpleFoam ({n_procs} procs) ==="
 {"decomposePar 2>&1 | tail -3 && mpirun --allow-run-as-root --oversubscribe -np " + str(n_procs) + " simpleFoam -parallel 2>&1 || simpleFoam 2>&1" if n_procs > 1 else "simpleFoam 2>&1"} || true
 
-{"reconstructPar -latestTime 2>&1 | tail -3" if n_procs > 1 else ""}
+{"reconstructPar 2>&1 | tail -3" if n_procs > 1 and transient else ("reconstructPar -latestTime 2>&1 | tail -3" if n_procs > 1 else "")}
 
 echo "=== Post-processing ==="
 postProcess -func writeCellCentres -latestTime 2>&1 | tail -3 || true
+postProcess -func wallShearStress -latestTime 2>&1 | tail -3 || true
 
 echo "=== DONE ==="
 """
@@ -1565,7 +1804,9 @@ echo "=== DONE ==="
         log += result.stderr.decode("utf-8", errors="replace")
         success = "=== DONE ===" in log and "FOAM FATAL" not in log
 
-        force_coeffs = _parse_force_coeffs(case_dir)
+        force_coeffs  = _parse_force_coeffs(case_dir)
+        force_history = _parse_force_history(case_dir) if transient else None
+        time_steps    = _list_time_steps(case_dir) if transient else []
 
         # Parse mesh cell count from polyMesh/owner (one entry per cell)
         n_cells = 0
@@ -1587,6 +1828,8 @@ echo "=== DONE ==="
             "force_coefficients": force_coeffs,
             "n_cells": n_cells,
             "n_points": n_points,
+            "time_steps": time_steps,
+            "force_history": force_history,
         }
     except subprocess.TimeoutExpired:
         return {"success": False, "log": "Timed out (900s)", "force_coefficients": None}
@@ -1594,9 +1837,14 @@ echo "=== DONE ==="
 
 def create_openfoam_case_3d(footprint, height, wind_speed=10.0, wind_angle=0.0,
                              z0=0.1, zref=None, nu=1.5e-5,
-                             output_dir=None, n_iterations=1000, n_procs=4,
-                             buildings=None):
-    """Create a 3D OpenFOAM case for building aerodynamics with ABL inlet."""
+                             output_dir=None, n_iterations=1000, n_procs=6,
+                             buildings=None, transient=False, end_time=5.0, dt=0.05,
+                             flow_type='abl'):
+    """Create a 3D OpenFOAM case for building aerodynamics.
+
+    flow_type: 'abl'     — atmospheric boundary layer inlet (log-law)
+               'channel' — uniform channel flow inlet (fixedValue)
+    """
     H = max(b["height"] for b in buildings) if buildings else height
     if zref is None:
         zref = H  # Reference height = building height
@@ -1605,30 +1853,67 @@ def create_openfoam_case_3d(footprint, height, wind_speed=10.0, wind_angle=0.0,
         output_dir = tempfile.mkdtemp(prefix="cfd3d_")
     case_dir = Path(output_dir)
 
-    # Wind direction
+    # Wind direction: the domain inlet is always at x_min, so we rotate the building
+    # footprint by -wind_angle to face the wind, and keep flow in +x direction.
+    # This matches how prepare_stl_case handles oblique wind (rot_z = -wind_angle).
     rad = math.radians(wind_angle)
-    flow_x = math.cos(rad)
-    flow_y = math.sin(rad)
+    rot_footprint = list(footprint)
+    rot_buildings = buildings
 
-    # Turbulence parameters — ABL log-law based, kOmegaSST
+    if abs(wind_angle) > 0.1:
+        cos_r = math.cos(-rad)
+        sin_r = math.sin(-rad)
+        # Rotate around the centroid of all buildings
+        if buildings:
+            all_pts = [p for b in buildings for p in b["footprint"]]
+        else:
+            all_pts = list(footprint)
+        cx_r = sum(p[0] for p in all_pts) / max(len(all_pts), 1)
+        cy_r = sum(p[1] for p in all_pts) / max(len(all_pts), 1)
+
+        def _rot2d(fp):
+            return [
+                [cx_r + (x - cx_r) * cos_r - (y - cy_r) * sin_r,
+                 cy_r + (x - cx_r) * sin_r + (y - cy_r) * cos_r]
+                for x, y in fp
+            ]
+
+        rot_footprint = _rot2d(footprint)
+        if buildings:
+            rot_buildings = [{**b, "footprint": _rot2d(b["footprint"])} for b in buildings]
+        print(f"  Rotated footprint by -{wind_angle}° so wind flows in +x")
+
+    # Wind always flows in +x after rotation
+    flow_x, flow_y = 1.0, 0.0
+
+    # Turbulence parameters — kOmegaSST
     kappa = 0.41
     Cmu = 0.09
-    u_star = wind_speed * kappa / math.log(max(zref, 1.0) / max(z0, 0.001))
-    k_inlet = u_star ** 2 / math.sqrt(Cmu)
-    omega_inlet = u_star / (math.sqrt(Cmu) * kappa * max(zref, 1.0))
-    nut_inlet = k_inlet / max(omega_inlet, 1e-10)
-
-    # Footprint dimensions for force coefficients (all buildings)
-    if buildings:
-        xs = [p[0] for b in buildings for p in b["footprint"]]
-        ys = [p[1] for b in buildings for p in b["footprint"]]
+    if flow_type == 'channel':
+        # Uniform channel flow: simple intensity + length-scale approach
+        I_turb = 0.05           # 5 % turbulence intensity
+        L_turb = max(0.1 * H, 0.001)
+        k_inlet     = 1.5 * (I_turb * wind_speed) ** 2
+        omega_inlet = math.sqrt(k_inlet) / (Cmu ** 0.25 * L_turb)
+        nut_inlet   = k_inlet / max(omega_inlet, 1e-10)
     else:
-        xs = [p[0] for p in footprint]
-        ys = [p[1] for p in footprint]
+        # ABL log-law based
+        u_star      = wind_speed * kappa / math.log(max(zref, 1.0) / max(z0, 0.001))
+        k_inlet     = u_star ** 2 / math.sqrt(Cmu)
+        omega_inlet = u_star / (math.sqrt(Cmu) * kappa * max(zref, 1.0))
+        nut_inlet   = k_inlet / max(omega_inlet, 1e-10)
+
+    # Footprint dimensions for force coefficients (use rotated footprint; wind is +x)
+    if rot_buildings:
+        xs = [p[0] for b in rot_buildings for p in b["footprint"]]
+        ys = [p[1] for b in rot_buildings for p in b["footprint"]]
+    else:
+        xs = [p[0] for p in rot_footprint]
+        ys = [p[1] for p in rot_footprint]
     char_w = max(xs) - min(xs)
     char_d = max(ys) - min(ys)
-    # Projected frontal area perpendicular to wind direction
-    frontal_width = char_w * abs(math.sin(rad)) + char_d * abs(math.cos(rad))
+    # Frontal area: with wind in +x, the frontal width is the y-extent of the building
+    frontal_width = char_d
     a_ref = frontal_width * H
 
     Re = wind_speed * H / nu
@@ -1637,10 +1922,11 @@ def create_openfoam_case_3d(footprint, height, wind_speed=10.0, wind_angle=0.0,
     for d in ["0", "constant", "system", "constant/polyMesh"]:
         (case_dir / d).mkdir(parents=True, exist_ok=True)
 
-    # ── ABL include file ──
+    # ── ABL include file (only needed for ABL inlet) ──
     (case_dir / "0" / "include").mkdir(exist_ok=True)
-    with open(case_dir / "0" / "include" / "ABLConditions", "w", newline="\n") as f:
-        f.write(f"""Uref    {wind_speed};
+    if flow_type != 'channel':
+        with open(case_dir / "0" / "include" / "ABLConditions", "w", newline="\n") as f:
+            f.write(f"""Uref    {wind_speed};
 Zref    {zref};
 zDir    (0 0 1);
 flowDir ({flow_x} {flow_y} 0);
@@ -1649,6 +1935,13 @@ d       uniform 0.0;
 """)
 
     # ── 0/U ──
+    _inlet_U_bc = (
+        f"        type            fixedValue;\n"
+        f"        value           uniform ({wind_speed * flow_x:.6g} {wind_speed * flow_y:.6g} 0);"
+        if flow_type == 'channel' else
+        f"        type            atmBoundaryLayerInletVelocity;\n"
+        f"        #include        \"include/ABLConditions\""
+    )
     _write_of_file(case_dir / "0" / "U", "volVectorField", "U", f"""
 dimensions      [0 1 -1 0 0 0 0];
 internalField   uniform ({wind_speed * flow_x} {wind_speed * flow_y} 0);
@@ -1656,8 +1949,7 @@ boundaryField
 {{
     inlet
     {{
-        type            atmBoundaryLayerInletVelocity;
-        #include        "include/ABLConditions"
+{_inlet_U_bc}
     }}
     outlet
     {{
@@ -1719,6 +2011,13 @@ boundaryField
 """)
 
     # ── 0/k ──
+    _inlet_k_bc = (
+        f"        type            fixedValue;\n"
+        f"        value           uniform {k_inlet:.6g};"
+        if flow_type == 'channel' else
+        f"        type            atmBoundaryLayerInletK;\n"
+        f"        #include        \"include/ABLConditions\""
+    )
     _write_of_file(case_dir / "0" / "k", "volScalarField", "k", f"""
 dimensions      [0 2 -2 0 0 0 0];
 internalField   uniform {k_inlet};
@@ -1726,8 +2025,7 @@ boundaryField
 {{
     inlet
     {{
-        type            atmBoundaryLayerInletK;
-        #include        "include/ABLConditions"
+{_inlet_k_bc}
     }}
     outlet
     {{
@@ -1864,6 +2162,19 @@ RAS
 """)
 
     # ── system/ ──
+    if transient:
+        _solver_app   = "pimpleFoam"
+        _end_t        = end_time
+        _delta_t      = dt
+        _write_int    = max(1, int(round(0.1 / dt)))  # write every ~0.1 s
+        _purge        = 0   # keep all time steps for animation
+    else:
+        _solver_app   = "simpleFoam"
+        _end_t        = n_iterations
+        _delta_t      = 1
+        _write_int    = max(50, n_iterations // 5)
+        _purge        = 2
+
     _write_of_file(case_dir / "system" / "controlDict", None, None, f"""
 FoamFile
 {{
@@ -1873,15 +2184,15 @@ FoamFile
     object      controlDict;
 }}
 libs            ("libatmosphericModels.so");
-application     simpleFoam;
+application     {_solver_app};
 startFrom       startTime;
 startTime       0;
 stopAt          endTime;
-endTime         {n_iterations};
-deltaT          1;
+endTime         {_end_t};
+deltaT          {_delta_t};
 writeControl    timeStep;
-writeInterval   {max(50, n_iterations // 5)};
-purgeWrite      2;
+writeInterval   {_write_int};
+purgeWrite      {_purge};
 writeFormat     ascii;
 writePrecision  8;
 writeCompression off;
@@ -1911,31 +2222,67 @@ functions
 }}
 """)
 
-    _write_of_file(case_dir / "system" / "fvSchemes", None, None, """
+    _ddt = "Euler" if transient else "steadyState"
+    _write_of_file(case_dir / "system" / "fvSchemes", None, None, f"""
 FoamFile
-{
+{{
     version     2.0;
     format      ascii;
     class       dictionary;
     object      fvSchemes;
-}
-ddtSchemes      { default steadyState; }
-gradSchemes     { default Gauss linear; }
+}}
+ddtSchemes      {{ default {_ddt}; }}
+gradSchemes     {{ default Gauss linear; }}
 divSchemes
-{
+{{
     default             none;
-    div(phi,U)          bounded Gauss linearUpwind grad(U);
-    div(phi,k)          bounded Gauss upwind;
-    div(phi,omega)      bounded Gauss upwind;
+    div(phi,U)          {"Gauss linearUpwind grad(U)" if transient else "bounded Gauss linearUpwind grad(U)"};
+    div(phi,k)          {"Gauss upwind" if transient else "bounded Gauss upwind"};
+    div(phi,omega)      {"Gauss upwind" if transient else "bounded Gauss upwind"};
     div((nuEff*dev2(T(grad(U))))) Gauss linear;
-}
-laplacianSchemes { default Gauss linear corrected; }
-interpolationSchemes { default linear; }
-snGradSchemes { default corrected; }
-wallDist { method meshWave; }
+}}
+laplacianSchemes {{ default Gauss linear corrected; }}
+interpolationSchemes {{ default linear; }}
+snGradSchemes {{ default corrected; }}
+wallDist {{ method meshWave; }}
 """)
 
-    _write_of_file(case_dir / "system" / "fvSolution", None, None, f"""
+    if transient:
+        _fv_solution = f"""
+FoamFile
+{{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      fvSolution;
+}}
+solvers
+{{
+    p       {{ solver GAMG; smoother GaussSeidel; tolerance 1e-06; relTol 0.01; }}
+    pFinal  {{ $p; relTol 0; }}
+    U       {{ solver smoothSolver; smoother GaussSeidel; tolerance 1e-07; relTol 0.01; }}
+    UFinal  {{ $U; relTol 0; }}
+    k       {{ solver smoothSolver; smoother GaussSeidel; tolerance 1e-07; relTol 0.01; }}
+    kFinal  {{ $k; relTol 0; }}
+    omega   {{ solver smoothSolver; smoother GaussSeidel; tolerance 1e-07; relTol 0.01; }}
+    omegaFinal {{ $omega; relTol 0; }}
+}}
+PIMPLE
+{{
+    nOuterCorrectors        2;
+    nCorrectors             2;
+    nNonOrthogonalCorrectors 1;
+    pRefCell 0;
+    pRefValue 0;
+}}
+relaxationFactors
+{{
+    fields    {{ p 0.7; }}
+    equations {{ U 0.9; k 0.9; omega 0.9; }}
+}}
+"""
+    else:
+        _fv_solution = f"""
 FoamFile
 {{
     version     2.0;
@@ -1963,7 +2310,8 @@ relaxationFactors
     fields {{ p 0.3; }}
     equations {{ U 0.5; k 0.5; omega 0.5; }}
 }}
-""")
+"""
+    _write_of_file(case_dir / "system" / "fvSolution", None, None, _fv_solution)
 
     # ── decomposeParDict for parallel runs ──
     if n_procs > 1:
@@ -1982,7 +2330,8 @@ method          scotch;
     # Save metadata
     meta = {
         "mode": "3d",
-        "footprint": footprint,
+        "footprint": footprint,            # original (unrotated) footprint
+        "rot_footprint": rot_footprint,    # rotated for mesh generation
         "height": H,
         "wind_speed": wind_speed,
         "wind_angle": wind_angle,
@@ -1992,6 +2341,8 @@ method          scotch;
     }
     if buildings:
         meta["buildings"] = buildings
+    if rot_buildings and rot_buildings is not buildings:
+        meta["rot_buildings"] = rot_buildings
     with open(case_dir / "case_meta.json", "w") as f:
         json.dump(meta, f, indent=2)
 
@@ -2000,10 +2351,20 @@ method          scotch;
 
 
 def run_openfoam_3d(case_dir, footprint, height, mesh_size=None,
-                     domain_factors=None, n_procs=4, buildings=None):
+                     domain_factors=None, n_procs=6, buildings=None, transient=False):
     """Run 3D OpenFOAM building simulation via WSL."""
     case_dir = Path(case_dir).resolve()
     msh_path = str(case_dir / "mesh.msh")
+
+    # Use rotated footprint if create_openfoam_case_3d already applied the wind rotation
+    meta_path = case_dir / "case_meta.json"
+    if meta_path.exists():
+        with open(meta_path) as _f:
+            _meta = json.load(_f)
+        if "rot_footprint" in _meta:
+            footprint = _meta["rot_footprint"]
+        if "rot_buildings" in _meta:
+            buildings = _meta["rot_buildings"]
 
     print("  [1/4] Generating 3D Gmsh mesh...")
     mesh_stats = generate_gmsh_msh_3d(footprint, height, msh_path,
@@ -2056,14 +2417,16 @@ decomposePar 2>&1 | tail -5
 echo "=== Starting simpleFoam ==="
 {"mpirun --allow-run-as-root --oversubscribe -np " + str(n_procs) + " simpleFoam -parallel 2>&1 || simpleFoam 2>&1" if use_parallel else "simpleFoam 2>&1"} || true
 
-{"" if not use_parallel else '''echo "=== reconstructPar ==="
-reconstructPar -latestTime 2>&1 | tail -3
-'''}
+{"" if not use_parallel else ('echo "=== reconstructPar ==="\nreconstructPar 2>&1 | tail -3' if transient else 'echo "=== reconstructPar ==="\nreconstructPar -latestTime 2>&1 | tail -3')}
+
 echo "=== Post-processing: writeCellCentres ==="
 postProcess -func writeCellCentres -latestTime 2>&1 | tail -3 || true
 
 echo "=== Post-processing: vorticity ==="
 postProcess -func vorticity -latestTime 2>&1 | tail -3 || true
+
+echo "=== Post-processing: wallShearStress ==="
+postProcess -func wallShearStress -latestTime 2>&1 | tail -3 || true
 
 echo "=== DONE ==="
 """
@@ -2079,14 +2442,18 @@ echo "=== DONE ==="
 
         print(f"  [3/4] simpleFoam {'OK' if success else 'FAILED'}")
 
-        force_coeffs = _parse_force_coeffs(case_dir)
-        print(f"  [4/4] Force coefficients: {force_coeffs}")
+        force_coeffs  = _parse_force_coeffs(case_dir)
+        force_history = _parse_force_history(case_dir) if transient else None
+        time_steps    = _list_time_steps(case_dir) if transient else []
+        print(f"  [4/4] Force coefficients: {force_coeffs}, time steps: {len(time_steps)}")
 
         return {
             "success": success,
             "log": log[-3000:],
             "force_coefficients": force_coeffs,
             "mesh_stats": mesh_stats,
+            "time_steps": time_steps,
+            "force_history": force_history,
         }
     except FileNotFoundError:
         return {"success": False, "log": "WSL not found", "force_coefficients": None}
@@ -2220,7 +2587,21 @@ def _cell_centers_from_mesh(mesh_dir):
         return None
 
 
-def extract_slice(case_dir, plane="z", value=0, field="pressure", tolerance=None):
+def _list_time_steps(case_dir):
+    """Return sorted list of solved time step values (float) from a case directory."""
+    steps = []
+    for d in Path(case_dir).iterdir():
+        if d.is_dir():
+            try:
+                t = float(d.name)
+                if t > 0 and (d / "p").exists():
+                    steps.append(t)
+            except ValueError:
+                pass
+    return sorted(steps)
+
+
+def extract_slice(case_dir, plane="z", value=0, field="pressure", tolerance=None, time_step=None):
     """Extract a 2D slice from 3D CFD results.
 
     Args:
@@ -2229,12 +2610,13 @@ def extract_slice(case_dir, plane="z", value=0, field="pressure", tolerance=None
         value: coordinate value for the slice
         field: 'pressure', 'speed', or 'turb_k'
         tolerance: slice thickness (auto if None)
+        time_step: specific time value to read (None = latest)
 
     Returns dict compatible with 2D visualization: {nodes, triangles, p_range}
     """
     case_dir = Path(case_dir)
 
-    # Find latest time directory
+    # Find target time directory (specific step or latest)
     time_dirs = []
     for d in case_dir.iterdir():
         if d.is_dir():
@@ -2247,7 +2629,10 @@ def extract_slice(case_dir, plane="z", value=0, field="pressure", tolerance=None
     if not time_dirs:
         return None
     time_dirs.sort(key=lambda d: float(d.name))
-    latest = time_dirs[-1]
+    if time_step is not None:
+        latest = min(time_dirs, key=lambda d: abs(float(d.name) - float(time_step)))
+    else:
+        latest = time_dirs[-1]
 
     # Parse cell centers — try several locations then fall back to mesh computation
     cell_centers = None
@@ -2290,9 +2675,12 @@ def extract_slice(case_dir, plane="z", value=0, field="pressure", tolerance=None
     if meta_path.exists():
         with open(meta_path) as f:
             meta = json.load(f)
-    footprint = meta.get("footprint", [])
+    # Use rotated footprint if available — that's the actual geometry in the CFD domain.
+    footprint = meta.get("rot_footprint") or meta.get("footprint", [])
     bld_height = meta.get("height", 0)
-    bld_list = meta.get("buildings", [])
+    # Use rotated buildings footprints for the mask
+    raw_bld = meta.get("rot_buildings") or meta.get("buildings", [])
+    bld_list = raw_bld if raw_bld else []
 
     # Compute building-centered crop region (all buildings).
     # The crop sets the grid resolution near the body (grid spacing = crop_span / n_grid).
@@ -2402,15 +2790,6 @@ def extract_slice(case_dir, plane="z", value=0, field="pressure", tolerance=None
         np.nan_to_num(grid_vx_arr, nan=0.0, copy=False)
         np.nan_to_num(grid_vy_arr, nan=0.0, copy=False)
 
-    # Build footprint polygon mask (exclude building interior on horizontal slices)
-    fp_polys = []
-    if bld_list and plane == "z":
-        for b in bld_list:
-            if 0 <= value <= b["height"]:
-                fp_polys.append(b["footprint"])
-    elif footprint and plane == "z" and 0 <= value <= bld_height:
-        fp_polys = [footprint]
-
     def _point_in_polygon(px, py, poly):
         n = len(poly)
         inside = False
@@ -2423,6 +2802,30 @@ def extract_slice(case_dir, plane="z", value=0, field="pressure", tolerance=None
             j = i
         return inside
 
+    # Build footprint polygon mask to exclude building interior.
+    # plane == "z" (horizontal): 2D coords are (x, y) — check if inside footprint.
+    # plane == "y" (vertical):   2D coords are (x, z) — check if (x, y_slice) inside
+    #                             footprint AND z <= building height.
+    # plane == "x": not yet handled (rare).
+    fp_polys = []          # for plane=="z": list of footprint polygons
+    fp_polys_vert = []     # for plane=="y": list of (footprint, max_z)
+
+    if plane == "z":
+        if bld_list:
+            for b in bld_list:
+                if 0 <= value <= b["height"]:
+                    fp_polys.append(b["footprint"])
+        elif footprint and 0 <= value <= bld_height:
+            fp_polys = [footprint]
+    elif plane == "y":
+        # For vertical slice at y=value: a grid node at 2D (px=x, py=z) is inside a
+        # building if (px, value) lies inside the footprint and py <= building height.
+        if bld_list:
+            for b in bld_list:
+                fp_polys_vert.append((b["footprint"], b["height"]))
+        elif footprint and bld_height > 0:
+            fp_polys_vert = [(footprint, bld_height)]
+
     # Build grid nodes and triangles (two tris per quad cell)
     grid_nodes = []
     node_id_map = {}  # (iy, ix) → sequential node id
@@ -2432,9 +2835,14 @@ def extract_slice(case_dir, plane="z", value=0, field="pressure", tolerance=None
             v = grid_vals[iy, ix]
             if np.isnan(v):
                 continue
-            # Skip points inside any building footprint
+            # Skip points inside any building
             px, py = gx[ix], gy[iy]
             if fp_polys and any(_point_in_polygon(px, py, fp) for fp in fp_polys):
+                continue
+            if fp_polys_vert and any(
+                py <= h and _point_in_polygon(px, value, fp)
+                for fp, h in fp_polys_vert
+            ):
                 continue
             vx_n = round(float(grid_vx_arr[iy, ix]), 4) if grid_vx_arr is not None else 0.0
             vy_n = round(float(grid_vy_arr[iy, ix]), 4) if grid_vy_arr is not None else 0.0
@@ -2674,6 +3082,252 @@ def _parse_raw_streamline(filepath):
         print(f"  Error parsing {filepath}: {e}")
     return pts, speeds
 
+
+###############################################################################
+# ── Surface streamlines (wallShearStress) ────────────────────────────────────
+###############################################################################
+
+
+def _parse_of_boundary(filepath):
+    """Parse constant/polyMesh/boundary → {name: {type, nFaces, startFace}} per patch."""
+    import re
+    filepath = Path(filepath)
+    if not filepath.exists():
+        return {}
+    content = filepath.read_text(errors='replace')
+    patches = {}
+    pat = re.compile(
+        r'(\w+)\s*\{[^}]*?type\s+(\w+)\s*;[^}]*?nFaces\s+(\d+)\s*;[^}]*?startFace\s+(\d+)\s*;',
+        re.DOTALL
+    )
+    skip = {'FoamFile', 'class', 'object', 'format', 'version', 'location'}
+    for m in pat.finditer(content):
+        name = m.group(1)
+        if name not in skip:
+            patches[name] = {
+                'type': m.group(2),
+                'nFaces': int(m.group(3)),
+                'startFace': int(m.group(4)),
+            }
+    return patches
+
+
+def _parse_of_points_np(filepath):
+    """Parse OpenFOAM points file → numpy array (N, 3)."""
+    import numpy as np, re
+    filepath = Path(filepath)
+    if not filepath.exists():
+        return None
+    content = filepath.read_text(errors='replace')
+    hdr_end = content.find('}', content.find('FoamFile') if 'FoamFile' in content else 0)
+    after_hdr = content[hdr_end:] if hdr_end >= 0 else content
+    m = re.search(r'\b(\d+)\s*\n\s*\(', after_hdr)
+    if not m:
+        return None
+    matches = re.findall(r'\(\s*([\S]+)\s+([\S]+)\s+([\S]+)\s*\)', after_hdr[m.end():])
+    if not matches:
+        return None
+    return np.array([[float(x), float(y), float(z)] for x, y, z in matches], dtype=np.float64)
+
+
+def _parse_patch_vector_field(filepath, patch_name):
+    """Parse nonuniform vector values for one boundary patch in an OF vector field file.
+    Returns list of (x,y,z) tuples or None if the patch is not found / uses uniform value."""
+    import re
+    filepath = Path(filepath)
+    if not filepath.exists():
+        return None
+    content = filepath.read_text(errors='replace')
+    bf_start = content.find('boundaryField')
+    if bf_start < 0:
+        return None
+    bf_text = content[bf_start:]
+    m = re.compile(r'\b' + re.escape(patch_name) + r'\s*\{').search(bf_text)
+    if not m:
+        return None
+    brace = bf_text.index('{', m.start())
+    depth = 1; pos = brace + 1
+    while pos < len(bf_text) and depth > 0:
+        if bf_text[pos] == '{': depth += 1
+        elif bf_text[pos] == '}': depth -= 1
+        pos += 1
+    block = bf_text[brace:pos]
+    vm = re.search(
+        r'value\s+nonuniform\s+List<vector>\s*\d+\s*\(([^;]+)\)',
+        block, re.DOTALL
+    )
+    if not vm:
+        return None
+    vecs = re.findall(r'\(\s*([\S]+)\s+([\S]+)\s+([\S]+)\s*\)', vm.group(1))
+    return [(float(x), float(y), float(z)) for x, y, z in vecs]
+
+
+def _integrate_surface_streamlines(centers, normals, vectors, n_seeds=40, n_steps=200):
+    """Euler-based nearest-neighbour streamline integration on a surface mesh.
+    Returns list of polylines [[x,y,z], ...] in input coordinate space."""
+    import numpy as np
+    try:
+        from scipy.spatial import cKDTree
+    except ImportError:
+        return []
+
+    magnitudes = np.linalg.norm(vectors, axis=1)
+    if not (magnitudes > 1e-10).any():
+        return []
+
+    tree = cKDTree(centers)
+    # Estimate step size from typical face-centre spacing
+    sample = centers[::max(1, len(centers) // 300)]
+    dists, _ = tree.query(sample, k=min(3, len(sample)))
+    ds = float(np.median(dists[:, 1])) * 0.7 if dists.shape[1] > 1 else 0.5
+    ds = max(0.02, min(ds, 10.0))
+
+    # Weight seeds by shear stress magnitude
+    w = magnitudes / magnitudes.sum()
+    rng = np.random.default_rng(42)
+    n_actual = min(n_seeds, int((magnitudes > 1e-10).sum()))
+    seed_ids = rng.choice(len(centers), size=n_actual, replace=False, p=w)
+
+    lines = []
+    for si in seed_ids:
+        pts = [centers[si].tolist()]
+        pos = centers[si].copy()
+        seen: set = {si}
+
+        for step in range(n_steps):
+            _, idx = tree.query(pos)
+            if magnitudes[idx] < 1e-10:
+                break
+            if step > 5 and idx in seen:
+                break
+            if step % 4 == 0:
+                seen.add(idx)
+
+            v = np.array(vectors[idx], dtype=np.float64)
+            n = normals[idx]
+            v -= np.dot(v, n) * n  # project onto surface tangent
+            v_mag = np.linalg.norm(v)
+            if v_mag < 1e-10:
+                break
+            pos = pos + (v / v_mag) * ds
+            pts.append([round(float(pos[0]), 3), round(float(pos[1]), 3), round(float(pos[2]), 3)])
+
+        if len(pts) > 5:
+            lines.append(pts)
+
+    return lines
+
+
+def extract_surface_streamlines(case_dir, n_seeds=40, n_steps=200):
+    """Extract surface streamlines from wallShearStress on building wall patches.
+
+    Returns list of polylines [[x,y,z], ...] in OpenFOAM Z-up coordinates.
+    Returns [] if wallShearStress was not computed or mesh files are too large.
+    """
+    import numpy as np
+    case_dir = Path(case_dir)
+
+    # Find latest time directory that contains wallShearStress
+    wss_file = None
+    best_t = -1.0
+    for d in case_dir.iterdir():
+        if not d.is_dir():
+            continue
+        try:
+            t = float(d.name)
+            if t > 0 and t > best_t and (d / 'wallShearStress').exists():
+                best_t = t
+                wss_file = d / 'wallShearStress'
+        except ValueError:
+            pass
+
+    if wss_file is None:
+        print('  [surface-lines] wallShearStress not found in any time directory')
+        return []
+
+    print(f'  [surface-lines] using {wss_file}')
+
+    # Read boundary patch info
+    boundary_file = case_dir / 'constant' / 'polyMesh' / 'boundary'
+    patches = _parse_of_boundary(boundary_file)
+    if not patches:
+        print('  [surface-lines] no boundary patches found')
+        return []
+
+    # Skip non-building patches (ground, inlet, outlet, etc.)
+    _skip = {'ground', 'terrain', 'floor', 'bottom', 'sky', 'top',
+             'inlet', 'outlet', 'atmosphere', 'front', 'back', 'left', 'right',
+             'frontandback', 'sides', 'symmetry', 'side', 'wall'}
+    building_patches = {}
+    for name, info in patches.items():
+        if info['type'] != 'wall':
+            continue
+        if name.lower() in _skip:
+            continue
+        if any(s in name.lower() for s in ('ground', 'terrain', 'inlet', 'outlet', 'atm')):
+            continue
+        wss_vals = _parse_patch_vector_field(wss_file, name)
+        if wss_vals and len(wss_vals) == info['nFaces']:
+            building_patches[name] = {'info': info, 'wss': wss_vals}
+
+    if not building_patches:
+        print(f'  [surface-lines] no building patches found (available: {list(patches.keys())})')
+        return []
+
+    # Guard against very large meshes (would be too slow to parse)
+    faces_file  = case_dir / 'constant' / 'polyMesh' / 'faces'
+    points_file = case_dir / 'constant' / 'polyMesh' / 'points'
+    SIZE_LIMIT = 60 * 1024 * 1024  # 60 MB
+    for f in (faces_file, points_file):
+        if f.exists() and f.stat().st_size > SIZE_LIMIT:
+            print(f'  [surface-lines] mesh file {f.name} exceeds size limit, skipping')
+            return []
+
+    faces = _parse_of_faces(faces_file)
+    pts   = _parse_of_points_np(points_file)
+    if faces is None or pts is None or len(faces) == 0:
+        print('  [surface-lines] could not read mesh geometry')
+        return []
+
+    print(f'  [surface-lines] {len(faces)} faces, {len(pts)} points, patches: {list(building_patches.keys())}')
+
+    # Collect face geometry
+    all_centers, all_normals, all_vectors = [], [], []
+    for pname, data in building_patches.items():
+        info = data['info']
+        wss  = data['wss']
+        nf, sf = info['nFaces'], info['startFace']
+        for i in range(nf):
+            fi = sf + i
+            if fi >= len(faces):
+                continue
+            fv = faces[fi]
+            if not fv or max(fv) >= len(pts):
+                continue
+            verts = pts[fv]
+            center = verts.mean(axis=0)
+            e1 = verts[1] - verts[0] if len(verts) > 1 else np.array([0., 0., 1.])
+            e2 = verts[-1] - verts[0] if len(verts) > 2 else np.array([0., 1., 0.])
+            normal = np.cross(e1, e2)
+            n_mag = np.linalg.norm(normal)
+            if n_mag > 1e-15:
+                normal /= n_mag
+            all_centers.append(center)
+            all_normals.append(normal)
+            all_vectors.append(wss[i])
+
+    if len(all_centers) < 10:
+        print(f'  [surface-lines] too few surface faces: {len(all_centers)}')
+        return []
+
+    centers = np.array(all_centers, dtype=np.float64)
+    normals = np.array(all_normals, dtype=np.float64)
+    vectors = np.array(all_vectors, dtype=np.float64)
+
+    print(f'  [surface-lines] {len(centers)} surface face centres, integrating…')
+    lines = _integrate_surface_streamlines(centers, normals, vectors, n_seeds, n_steps)
+    print(f'  [surface-lines] {len(lines)} streamlines generated')
+    return lines
 
 def _parse_vtk_streamlines(vtk_path):
     """Parse a VTK polydata file with streamlines. Returns list of polylines."""

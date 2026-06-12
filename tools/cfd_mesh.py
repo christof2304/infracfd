@@ -1,165 +1,417 @@
 """
-CFD Mesh Generator for 2D bridge cross-section aerodynamics.
+CFD Mesh Generator for 2D cross-section aerodynamics.
 
 Generates a 2D mesh around a cross-section polygon using Gmsh:
-- O-grid topology around the section
-- Boundary layer refinement
-- Far-field boundary at configurable distance
-- Output as JSON (nodes, elements) for visualization and solver input
+- Structured quad boundary-layer (inflation) rows near the wall
+- Unstructured Frontal-Delaunay fill in the free-stream
+- Circular far-field boundary
 
 Usage:
     from tools.cfd_mesh import generate_cfd_mesh
-    result = generate_cfd_mesh(polygon, wind_angle=0, mesh_size=0.1, far_field=20)
+    result = generate_cfd_mesh(polygon, wind_speed=90, mesh_size=0.02, far_field_factor=20)
 """
 
-import json
 import math
 import os
 import tempfile
 
 
-def generate_cfd_mesh(polygon, wind_angle=0, mesh_size=0.5, far_field_factor=15,
-                      bl_layers=4, bl_ratio=1.4):
+# ── Structured O-mesh helpers ──────────────────────────────────────────────────
+
+def _cosine_resample(pts, n):
+    """Resample pts to n+1 cosine-spaced points by arc length (clusters at both ends)."""
+    cum = [0.0]
+    for i in range(1, len(pts)):
+        dx, dy = pts[i][0] - pts[i-1][0], pts[i][1] - pts[i-1][1]
+        cum.append(cum[-1] + math.sqrt(dx*dx + dy*dy))
+    total = cum[-1]
+    if total < 1e-14:
+        return [list(pts[0])] * (n + 1)
+    result = []
+    for j in range(n + 1):
+        t = min(total * (1 - math.cos(math.pi * j / n)) / 2, total)
+        lo, hi = 0, len(cum) - 2
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if cum[mid + 1] < t:
+                lo = mid + 1
+            else:
+                hi = mid
+        seg = cum[lo + 1] - cum[lo]
+        alpha = (t - cum[lo]) / seg if seg > 1e-14 else 0.0
+        result.append([
+            pts[lo][0] + alpha * (pts[lo+1][0] - pts[lo][0]),
+            pts[lo][1] + alpha * (pts[lo+1][1] - pts[lo][1]),
+        ])
+    return result
+
+
+def _omesh(polygon, wind_speed, mesh_size, far_field_factor, nu):
+    """Fully-structured O-grid quad mesh for smooth closed profiles (airfoils, cylinders).
+
+    Uses Spline curves so each surface side is ONE curve entity, which is required
+    for Gmsh TransfiniteSurface to work correctly. Returns n_triangles = 0.
     """
-    Generate a 2D CFD mesh around a cross-section polygon.
+    import gmsh
+
+    xs = [p[0] for p in polygon]
+    ys = [p[1] for p in polygon]
+    cx = (max(xs) + min(xs)) / 2
+    cy = (max(ys) + min(ys)) / 2
+    char_dim = max(max(xs) - min(xs), max(ys) - min(ys))
+    far_r = char_dim * far_field_factor
+
+    # First wall-normal cell (y+ = 50)
+    if wind_speed and wind_speed > 0:
+        Re = max(wind_speed * char_dim / nu, 1e4)
+        Cf = 0.074 / Re ** 0.2
+        u_tau = wind_speed * math.sqrt(max(Cf / 2.0, 1e-10))
+        first_layer = max(5e-6, 50.0 * nu / u_tau)
+    else:
+        first_layer = max(2e-4, char_dim * 0.003)
+
+    # Radial layers: geometric growth from first_layer to far_r
+    r_g = 1.15
+    N_r = int(math.ceil(math.log(far_r * (r_g - 1) / first_layer + 1) / math.log(r_g)))
+    N_r = max(40, min(N_r, 120))
+    N_s = 60  # segments per half-surface
+
+    # ── Split polygon into upper / lower arcs ─────────────────────────────────
+    n = len(polygon)
+    le_idx = min(range(n), key=lambda i: polygon[i][0])
+    te_idx = max(range(n), key=lambda i: polygon[i][0])
+
+    le_pt = [polygon[le_idx][0], polygon[le_idx][1]]
+    te_pt = [polygon[te_idx][0], 0.0]   # close TE symmetrically
+
+    def walk(start, end, step):
+        pts, i = [], start
+        while i != end:
+            pts.append(list(polygon[i]))
+            i = (i + step) % n
+        pts.append(list(polygon[end]))
+        return pts
+
+    fwd = walk(le_idx, te_idx,  1)
+    bwd = walk(le_idx, te_idx, -1)
+
+    if sum(p[1] for p in fwd) >= sum(p[1] for p in bwd):
+        upper_raw, lower_raw = fwd, list(reversed(bwd))
+    else:
+        upper_raw, lower_raw = bwd, list(reversed(fwd))
+
+    upper_raw[0]  = le_pt[:]
+    upper_raw[-1] = te_pt[:]
+    lower_raw[0]  = te_pt[:]
+    lower_raw[-1] = le_pt[:]
+
+    upper_pts = _cosine_resample(upper_raw, N_s)   # LE→TE, N_s+1 pts
+    lower_pts = _cosine_resample(lower_raw, N_s)   # TE→LE, N_s+1 pts
+
+    # Radial projection to far-field circle
+    def to_ff(pt):
+        dx, dy = pt[0] - cx, pt[1] - cy
+        d = math.sqrt(dx*dx + dy*dy)
+        if d < 1e-10:
+            return [cx + far_r, cy]
+        return [cx + dx * far_r / d, cy + dy * far_r / d]
+
+    upper_ff = [to_ff(p) for p in upper_pts]   # LE_ff→TE_ff
+    lower_ff = [to_ff(p) for p in lower_pts]   # TE_ff→LE_ff
+
+    # ── Gmsh geometry ─────────────────────────────────────────────────────────
+    gmsh.initialize()
+    gmsh.option.setNumber("General.Verbosity", 0)
+    gmsh.model.add("omesh")
+
+    def gpt(x, y):
+        return gmsh.model.geo.addPoint(x, y, 0, 1.0)
+
+    # Upper airfoil arc: N_s+1 points (ut[0]=LE, ut[N_s]=TE)
+    ut = [gpt(*p) for p in upper_pts]
+
+    # Lower airfoil arc: reuse TE=ut[N_s] and LE=ut[0]; N_s-1 interior points
+    lt_int = [gpt(*p) for p in lower_pts[1:-1]]
+    lt = [ut[N_s]] + lt_int + [ut[0]]          # lt[0]=TE, lt[N_s]=LE
+
+    # Upper far-field arc: N_s+1 points (uft[0]=LE_ff, uft[N_s]=TE_ff)
+    uft = [gpt(*p) for p in upper_ff]
+
+    # Lower far-field arc: reuse TE_ff=uft[N_s] and LE_ff=uft[0]
+    lft_int = [gpt(*p) for p in lower_ff[1:-1]]
+    lft = [uft[N_s]] + lft_int + [uft[0]]      # lft[0]=TE_ff, lft[N_s]=LE_ff
+
+    # Radial connectors (single straight lines, LE/TE to far-field)
+    le_rad = gmsh.model.geo.addLine(ut[0],   uft[0])    # LE→LE_ff
+    te_rad = gmsh.model.geo.addLine(ut[N_s], uft[N_s])  # TE→TE_ff
+
+    # One spline per arc (Gmsh TransfiniteSurface requires one curve per side)
+    u_spl  = gmsh.model.geo.addSpline(ut)    # upper airfoil  LE→TE
+    l_spl  = gmsh.model.geo.addSpline(lt)    # lower airfoil  TE→LE
+    uf_spl = gmsh.model.geo.addSpline(uft)   # upper far-field LE_ff→TE_ff
+    lf_spl = gmsh.model.geo.addSpline(lft)   # lower far-field TE_ff→LE_ff
+
+    # Upper surface: LE→TE (u_spl) + TE→TE_ff (te_rad) + TE_ff→LE_ff (-uf_spl) + LE_ff→LE (-le_rad)
+    uloop = gmsh.model.geo.addCurveLoop([u_spl, te_rad, -uf_spl, -le_rad])
+    usurf = gmsh.model.geo.addPlaneSurface([uloop])
+
+    # Lower surface: TE→LE (l_spl) + LE→LE_ff (le_rad) + LE_ff→TE_ff (-lf_spl) + TE_ff→TE (-te_rad)
+    lloop = gmsh.model.geo.addCurveLoop([l_spl, le_rad, -lf_spl, -te_rad])
+    lsurf = gmsh.model.geo.addPlaneSurface([lloop])
+
+    gmsh.model.addPhysicalGroup(1, [u_spl, l_spl],   tag=1, name="section")
+    gmsh.model.addPhysicalGroup(1, [uf_spl, lf_spl], tag=2, name="farfield")
+    gmsh.model.addPhysicalGroup(2, [usurf, lsurf],    tag=1, name="fluid")
+
+    # ONE synchronize at the end, then set all mesh attributes
+    gmsh.model.geo.synchronize()
+
+    # Transfinite distributions — must be set AFTER final synchronize()
+    gmsh.model.mesh.setTransfiniteCurve(u_spl,  N_s + 1)
+    gmsh.model.mesh.setTransfiniteCurve(l_spl,  N_s + 1)
+    gmsh.model.mesh.setTransfiniteCurve(uf_spl, N_s + 1)
+    gmsh.model.mesh.setTransfiniteCurve(lf_spl, N_s + 1)
+    gmsh.model.mesh.setTransfiniteCurve(le_rad, N_r + 1, "Progression", r_g)
+    gmsh.model.mesh.setTransfiniteCurve(te_rad, N_r + 1, "Progression", r_g)
+    gmsh.model.mesh.setTransfiniteSurface(usurf, "Left",
+        [ut[0], ut[N_s], uft[N_s], uft[0]])
+    gmsh.model.mesh.setTransfiniteSurface(lsurf, "Left",
+        [lt[0], lt[N_s], lft[N_s], lft[0]])
+    gmsh.model.mesh.setRecombine(2, usurf)
+    gmsh.model.mesh.setRecombine(2, lsurf)
+
+    gmsh.model.mesh.generate(2)
+
+    # ── Extract mesh data ──────────────────────────────────────────────────────
+    node_tags, node_coords, _ = gmsh.model.mesh.getNodes()
+    nodes, node_map = [], {}
+    for i, tag in enumerate(node_tags):
+        x, y = node_coords[i * 3], node_coords[i * 3 + 1]
+        nodes.append({"id": int(tag), "x": round(x, 6), "y": round(y, 6)})
+        node_map[int(tag)] = (x, y)
+
+    triangles, quads = [], []
+    eid = 1
+    for etype, etags, enodes in zip(*gmsh.model.mesh.getElements(dim=2)):
+        if etype == 2:
+            for i in range(len(etags)):
+                triangles.append({"id": eid, "nodes": [int(enodes[i*3+j]) for j in range(3)]})
+                eid += 1
+        elif etype == 3:
+            for i in range(len(etags)):
+                quads.append({"id": eid, "nodes": [int(enodes[i*4+j]) for j in range(4)]})
+                eid += 1
+
+    sec_nodes = set()
+    for l in [u_spl, l_spl]:
+        for nt in gmsh.model.mesh.getNodes(dim=1, tag=l)[0]:
+            sec_nodes.add(int(nt))
+
+    ff_nodes = set()
+    for l in [uf_spl, lf_spl]:
+        for nt in gmsh.model.mesh.getNodes(dim=1, tag=l)[0]:
+            ff_nodes.add(int(nt))
+
+    stats = {
+        "n_nodes":           len(nodes),
+        "n_triangles":       len(triangles),
+        "n_quads":           len(quads),
+        "n_elements":        len(triangles) + len(quads),
+        "n_section_nodes":   len(sec_nodes),
+        "n_farfield_nodes":  len(ff_nodes),
+        "char_dim":          round(char_dim, 4),
+        "far_field_r":       round(far_r, 3),
+        "bl_layers":         N_r,
+        "bl_first_layer_mm": round(first_layer * 1000, 4),
+        "n_corners":         0,
+    }
+
+    gmsh.finalize()
+
+    return {
+        "nodes":             nodes,
+        "triangles":         triangles,
+        "quads":             quads,
+        "boundary_section":  sorted(sec_nodes),
+        "boundary_farfield": sorted(ff_nodes),
+        "section_polygon":   polygon,
+        "wind_angle":        0,
+        "stats":             stats,
+    }
+
+
+# ── Main unstructured mesh (hybrid BL quads + Delaunay triangles) ──────────────
+
+def generate_cfd_mesh(polygon, wind_angle=0, mesh_size=0.5, far_field_factor=15,
+                      bl_layers=None, bl_ratio=1.25, wind_speed=None, nu=1.5e-5,
+                      structured=False):
+    """Generate a 2D CFD mesh around a cross-section polygon.
 
     Args:
-        polygon: list of [x, y] points defining the cross-section (closed, CCW)
-        wind_angle: wind direction in degrees (0 = from left)
-        mesh_size: target element size near the section [m]
+        polygon:          [[x,y],...] — closed CCW cross-section boundary
+        wind_angle:       flow direction in degrees (0 = from left, unused for mesh)
+        mesh_size:        target element size in the bulk domain [m]
         far_field_factor: far-field radius as multiple of section width
-        bl_thickness: total boundary layer thickness [m]
-        bl_layers: number of boundary layer elements
-        bl_ratio: growth ratio for boundary layer
+        bl_layers:        number of quad BL rows (None → computed adaptively)
+        bl_ratio:         BL cell height growth ratio
+        wind_speed:       free-stream speed [m/s] used to size first BL row via y⁺=50
+        nu:               kinematic viscosity [m²/s]
+        structured:       use fully-structured O-grid (quads only, best for smooth profiles)
 
     Returns:
-        dict with:
-            nodes: [{id, x, y}]
-            triangles: [{id, nodes: [n1, n2, n3]}]
-            quads: [{id, nodes: [n1, n2, n3, n4]}]  (boundary layer)
-            boundary_section: [node_ids on section surface]
-            boundary_farfield: [node_ids on far-field]
-            section_polygon: [[x,y], ...] (input polygon)
-            stats: {n_nodes, n_elements, n_bl_elements}
+        dict: nodes, triangles, quads, boundary_section, boundary_farfield,
+              section_polygon, wind_angle, stats
     """
+    if structured:
+        return _omesh(polygon, wind_speed, mesh_size, far_field_factor, nu)
+
     import gmsh
 
     gmsh.initialize()
     gmsh.option.setNumber("General.Verbosity", 0)
     gmsh.model.add("cfd_section")
 
-    # Compute section dimensions
+    # ── Section geometry ─────────────────────────────────────────────
     xs = [p[0] for p in polygon]
     ys = [p[1] for p in polygon]
-    cx = sum(xs) / len(xs)
-    cy = sum(ys) / len(ys)
-    width = max(xs) - min(xs)
-    height = max(ys) - min(ys)
+    cx       = sum(xs) / len(xs)
+    cy       = sum(ys) / len(ys)
+    width    = max(xs) - min(xs)
+    height   = max(ys) - min(ys)
     char_dim = max(width, height)
-    far_field_r = char_dim * far_field_factor
+    far_field_r  = char_dim * far_field_factor
+    ff_mesh_size = char_dim * 2.0
 
-    # Far-field mesh size (coarser away from section)
-    ff_mesh_size = char_dim * 2
+    # ── First BL layer height (y⁺ = 50, wall functions) ─────────────
+    if wind_speed is not None and wind_speed > 0:
+        Re   = wind_speed * char_dim / nu
+        # Prandtl turbulent flat-plate: Cf ≈ 0.074 Re^(-0.2)
+        Cf    = 0.074 / max(Re, 1e4) ** 0.2
+        u_tau = wind_speed * math.sqrt(max(Cf / 2.0, 1e-10))
+        first_layer = max(5e-6, 50.0 * nu / u_tau)
+    else:
+        # Geometric fallback: ~0.3 % of char_dim
+        first_layer = max(2e-4, char_dim * 0.003)
 
-    # Create section polygon points
+    # ── Adaptive layer count ──────────────────────────────────────────
+    # Grow until outermost cell ≥ mesh_size × 0.3  OR  total BL > 8 % char_dim
+    if bl_layers is None:
+        max_total = char_dim * 0.08
+        max_cell  = mesh_size * 0.3
+        n_ly = 1
+        while n_ly < 25:
+            if first_layer * bl_ratio ** n_ly > max_cell:
+                break
+            if first_layer * (bl_ratio ** n_ly - 1.0) / (bl_ratio - 1.0) > max_total:
+                break
+            n_ly += 1
+        bl_layers = max(4, n_ly)
+
+    # Outermost BL cell size — used to set the near-surface background mesh
+    bl_outer = first_layer * bl_ratio ** bl_layers
+
+    # ── Gmsh geometry ─────────────────────────────────────────────────
     section_points = []
-    for i, (x, y) in enumerate(polygon):
+    for x, y in polygon:
         pid = gmsh.model.geo.addPoint(x, y, 0, mesh_size)
         section_points.append(pid)
 
-    # Create section lines (closed loop)
     section_lines = []
-    n = len(section_points)
-    for i in range(n):
-        lid = gmsh.model.geo.addLine(section_points[i], section_points[(i + 1) % n])
+    n_pts = len(section_points)
+    for i in range(n_pts):
+        lid = gmsh.model.geo.addLine(section_points[i],
+                                      section_points[(i + 1) % n_pts])
         section_lines.append(lid)
 
     section_loop = gmsh.model.geo.addCurveLoop(section_lines)
 
-    # Create circular far-field boundary
+    ff_n      = 32
     ff_points = []
-    ff_n = 32  # points on far-field circle
     for i in range(ff_n):
-        angle = 2 * math.pi * i / ff_n
-        x = cx + far_field_r * math.cos(angle)
-        y = cy + far_field_r * math.sin(angle)
-        pid = gmsh.model.geo.addPoint(x, y, 0, ff_mesh_size)
+        a   = 2.0 * math.pi * i / ff_n
+        pid = gmsh.model.geo.addPoint(cx + far_field_r * math.cos(a),
+                                       cy + far_field_r * math.sin(a),
+                                       0, ff_mesh_size)
         ff_points.append(pid)
 
-    # Far-field arcs (4 quarter circles)
     center_pt = gmsh.model.geo.addPoint(cx, cy, 0, ff_mesh_size)
-    ff_arcs = []
-    quarter = ff_n // 4
+    ff_arcs   = []
+    quarter   = ff_n // 4
     for i in range(4):
-        start = ff_points[i * quarter]
-        end = ff_points[((i + 1) * quarter) % ff_n]
-        arc = gmsh.model.geo.addCircleArc(start, center_pt, end)
+        arc = gmsh.model.geo.addCircleArc(ff_points[i * quarter],
+                                           center_pt,
+                                           ff_points[((i + 1) * quarter) % ff_n])
         ff_arcs.append(arc)
 
     ff_loop = gmsh.model.geo.addCurveLoop(ff_arcs)
-
-    # Create surface between section and far-field (annular domain)
     surface = gmsh.model.geo.addPlaneSurface([ff_loop, section_loop])
 
     gmsh.model.geo.synchronize()
 
-    # ── Size fields ──────────────────────────────────────────────────────────
-    # 1. Distance from section surface
+    # ── Background size field ─────────────────────────────────────────
     dist_field = gmsh.model.mesh.field.add("Distance")
     gmsh.model.mesh.field.setNumbers(dist_field, "CurvesList", section_lines)
 
-    # 2. Three-zone threshold:
-    #    - Very fine immediately outside BL (near-wake, shear layers)
-    #    - Medium in near-field
-    #    - Coarse in far-field
-    near_size  = mesh_size * 0.6          # just outside BL
-    trans_size = mesh_size                  # mid near-field
-    dist_near  = char_dim * 0.3            # end of very fine zone
-    dist_trans = char_dim * 1.5            # end of near-field
+    # Smooth transition: bl_outer → mesh_size → ff_mesh_size
+    near_size = max(bl_outer * 2.5, mesh_size * 0.4)
 
-    thresh1 = gmsh.model.mesh.field.add("Threshold")
-    gmsh.model.mesh.field.setNumber(thresh1, "InField",  dist_field)
-    gmsh.model.mesh.field.setNumber(thresh1, "SizeMin",  near_size)
-    gmsh.model.mesh.field.setNumber(thresh1, "SizeMax",  ff_mesh_size)
-    gmsh.model.mesh.field.setNumber(thresh1, "DistMin",  dist_near)
-    gmsh.model.mesh.field.setNumber(thresh1, "DistMax",  far_field_r * 0.4)
-    gmsh.model.mesh.field.setNumber(thresh1, "Sigmoid",  1)   # smooth S-curve transition
+    thresh = gmsh.model.mesh.field.add("Threshold")
+    gmsh.model.mesh.field.setNumber(thresh, "InField",  dist_field)
+    gmsh.model.mesh.field.setNumber(thresh, "SizeMin",  near_size)
+    gmsh.model.mesh.field.setNumber(thresh, "SizeMax",  ff_mesh_size)
+    gmsh.model.mesh.field.setNumber(thresh, "DistMin",  char_dim * 0.3)
+    gmsh.model.mesh.field.setNumber(thresh, "DistMax",  far_field_r * 0.4)
+    gmsh.model.mesh.field.setNumber(thresh, "Sigmoid",  1)
+    gmsh.model.mesh.field.setAsBackgroundMesh(thresh)
 
-    gmsh.model.mesh.field.setAsBackgroundMesh(thresh1)
     gmsh.option.setNumber("Mesh.MeshSizeExtendFromBoundary", 0)
     gmsh.option.setNumber("Mesh.MeshSizeFromPoints",         0)
     gmsh.option.setNumber("Mesh.MeshSizeFromCurvature",      0)
-    gmsh.option.setNumber("Mesh.Smoothing",                  5)  # Laplacian smoothing passes
+    gmsh.option.setNumber("Mesh.Smoothing",                  5)
 
-    # ── Boundary Layer ────────────────────────────────────────────────────────
-    # Tuned for k-epsilon wall functions (y+ ≈ 30–100):
-    #   first_layer ≈ char_dim * 0.003   →  y+ ~ 50 at Re ~ 10^6
-    #   4 layers at ratio 1.4  →  total ≈ 12× first_layer
-    if bl_layers > 0:
-        first_layer = max(2e-4, min(mesh_size * 0.04, char_dim * 0.004))
+    # ── Boundary layer field ──────────────────────────────────────────
+    # PointsList: only vertices with interior angle < 150° (genuine sharp corners).
+    # For smooth profiles (airfoils, cylinders): PointsList stays empty.
+    # For bluff bodies (rectangles, box girders): corner points are added so
+    # Gmsh generates fan elements that prevent quad overlap at corners.
+    corner_pts = []
+    for i in range(n_pts):
+        p0 = polygon[(i - 1) % n_pts]
+        p1 = polygon[i]
+        p2 = polygon[(i + 1) % n_pts]
+        v1 = (p0[0] - p1[0], p0[1] - p1[1])
+        v2 = (p2[0] - p1[0], p2[1] - p1[1])
+        l1 = math.hypot(*v1)
+        l2 = math.hypot(*v2)
+        if l1 < 1e-10 or l2 < 1e-10:
+            continue
+        cos_a = max(-1.0, min(1.0, (v1[0]*v2[0] + v1[1]*v2[1]) / (l1 * l2)))
+        if math.degrees(math.acos(cos_a)) < 150.0:
+            corner_pts.append(section_points[i])
 
-        bl_field = gmsh.model.mesh.field.add("BoundaryLayer")
-        gmsh.model.mesh.field.setNumbers(bl_field, "CurvesList",    section_lines)
-        gmsh.model.mesh.field.setNumbers(bl_field, "PointsList",    section_points)
-        gmsh.model.mesh.field.setNumber (bl_field, "Size",          first_layer)
-        gmsh.model.mesh.field.setNumber (bl_field, "Ratio",         bl_ratio)
-        gmsh.model.mesh.field.setNumber (bl_field, "NbLayers",      bl_layers)
-        gmsh.model.mesh.field.setNumber (bl_field, "Quads",         1)
-        # IntersectMetrics=1 avoids element collapse at sharp concave corners
-        gmsh.model.mesh.field.setNumber (bl_field, "IntersectMetrics", 1)
-        gmsh.model.mesh.field.setAsBoundaryLayer(bl_field)
+    bl_field = gmsh.model.mesh.field.add("BoundaryLayer")
+    gmsh.model.mesh.field.setNumbers(bl_field, "CurvesList", section_lines)
+    if corner_pts:
+        gmsh.model.mesh.field.setNumbers(bl_field, "PointsList", corner_pts)
+    gmsh.model.mesh.field.setNumber(bl_field, "Size",     first_layer)
+    gmsh.model.mesh.field.setNumber(bl_field, "Ratio",    bl_ratio)
+    gmsh.model.mesh.field.setNumber(bl_field, "NbLayers", bl_layers)
+    gmsh.model.mesh.field.setNumber(bl_field, "Quads",    1)
+    gmsh.model.mesh.field.setAsBoundaryLayer(bl_field)
 
-    # Physical groups for boundary conditions
+    # Algorithm 6 (Frontal-Delaunay) integrates best with BoundaryLayer fields
+    gmsh.option.setNumber("Mesh.Algorithm", 6)
+
+    # ── Physical groups ───────────────────────────────────────────────
     gmsh.model.addPhysicalGroup(1, section_lines, tag=1, name="section")
-    gmsh.model.addPhysicalGroup(1, ff_arcs, tag=2, name="farfield")
-    gmsh.model.addPhysicalGroup(2, [surface], tag=1, name="fluid")
+    gmsh.model.addPhysicalGroup(1, ff_arcs,       tag=2, name="farfield")
+    gmsh.model.addPhysicalGroup(2, [surface],     tag=1, name="fluid")
 
-    # Generate 2D mesh
     gmsh.model.mesh.generate(2)
 
-    # Extract mesh data
+    # ── Extract mesh data ─────────────────────────────────────────────
     node_tags, node_coords, _ = gmsh.model.mesh.getNodes()
-    nodes = []
+    nodes    = []
     node_map = {}
     for i, tag in enumerate(node_tags):
         x = node_coords[i * 3]
@@ -167,79 +419,86 @@ def generate_cfd_mesh(polygon, wind_angle=0, mesh_size=0.5, far_field_factor=15,
         nodes.append({"id": int(tag), "x": round(x, 6), "y": round(y, 6)})
         node_map[int(tag)] = (x, y)
 
-    # Get elements
     triangles = []
-    quads = []
+    quads     = []
     elem_types, elem_tags, elem_node_tags = gmsh.model.mesh.getElements(dim=2)
     eid = 1
     for etype, etags, enodes in zip(elem_types, elem_tags, elem_node_tags):
-        if etype == 2:  # 3-node triangle
+        if etype == 2:   # 3-node triangle
             for i in range(len(etags)):
-                n1 = int(enodes[i * 3])
-                n2 = int(enodes[i * 3 + 1])
-                n3 = int(enodes[i * 3 + 2])
-                triangles.append({"id": eid, "nodes": [n1, n2, n3]})
+                triangles.append({"id": eid,
+                                   "nodes": [int(enodes[i*3]),
+                                             int(enodes[i*3+1]),
+                                             int(enodes[i*3+2])]})
                 eid += 1
-        elif etype == 3:  # 4-node quad
+        elif etype == 3: # 4-node quad
             for i in range(len(etags)):
-                n1 = int(enodes[i * 4])
-                n2 = int(enodes[i * 4 + 1])
-                n3 = int(enodes[i * 4 + 2])
-                n4 = int(enodes[i * 4 + 3])
-                quads.append({"id": eid, "nodes": [n1, n2, n3, n4]})
+                quads.append({"id": eid,
+                               "nodes": [int(enodes[i*4]),
+                                         int(enodes[i*4+1]),
+                                         int(enodes[i*4+2]),
+                                         int(enodes[i*4+3])]})
                 eid += 1
 
-    # Get boundary nodes
     section_node_ids = set()
     for line in section_lines:
-        _, tags, _ = gmsh.model.mesh.getElements(dim=1, tag=line)
-        for tag_arr in tags:
-            for t in tag_arr:
-                pass
-        node_tags_line = gmsh.model.mesh.getNodes(dim=1, tag=line)[0]
-        for nt in node_tags_line:
+        for nt in gmsh.model.mesh.getNodes(dim=1, tag=line)[0]:
             section_node_ids.add(int(nt))
 
     ff_node_ids = set()
     for arc in ff_arcs:
-        node_tags_arc = gmsh.model.mesh.getNodes(dim=1, tag=arc)[0]
-        for nt in node_tags_arc:
+        for nt in gmsh.model.mesh.getNodes(dim=1, tag=arc)[0]:
             ff_node_ids.add(int(nt))
 
     stats = {
-        "n_nodes": len(nodes),
-        "n_triangles": len(triangles),
-        "n_quads": len(quads),
-        "n_elements": len(triangles) + len(quads),
-        "n_section_nodes": len(section_node_ids),
+        "n_nodes":          len(nodes),
+        "n_triangles":      len(triangles),
+        "n_quads":          len(quads),
+        "n_elements":       len(triangles) + len(quads),
+        "n_section_nodes":  len(section_node_ids),
         "n_farfield_nodes": len(ff_node_ids),
-        "char_dim": round(char_dim, 3),
-        "far_field_r": round(far_field_r, 3),
+        "char_dim":         round(char_dim, 4),
+        "far_field_r":      round(far_field_r, 3),
+        "bl_layers":        bl_layers,
+        "bl_first_layer_mm": round(first_layer * 1000, 4),
+        "n_corners":        len(corner_pts),
     }
 
     gmsh.finalize()
 
     return {
-        "nodes": nodes,
-        "triangles": triangles,
-        "quads": quads,
-        "boundary_section": sorted(section_node_ids),
-        "boundary_farfield": sorted(ff_node_ids),
-        "section_polygon": polygon,
-        "wind_angle": wind_angle,
-        "stats": stats,
+        "nodes":              nodes,
+        "triangles":          triangles,
+        "quads":              quads,
+        "boundary_section":   sorted(section_node_ids),
+        "boundary_farfield":  sorted(ff_node_ids),
+        "section_polygon":    polygon,
+        "wind_angle":         wind_angle,
+        "stats":              stats,
     }
 
 
 if __name__ == "__main__":
-    # Test: rectangular cross-section
-    rect = [[0, 0], [4, 0], [4, 0.5], [0, 0.5]]
-    result = generate_cfd_mesh(rect, mesh_size=0.2, far_field_factor=10)
-    print(f"Mesh: {result['stats']['n_nodes']} nodes, {result['stats']['n_elements']} elements")
-    print(f"Section boundary: {result['stats']['n_section_nodes']} nodes")
-    print(f"Far-field: {result['stats']['n_farfield_nodes']} nodes")
+    # Quick smoke-test: rectangle (bluff body) + NACA0012 (smooth profile)
+    import json, math
 
-    # Save for inspection
-    with open("tests/_output/cfd_mesh_test.json", "w") as f:
-        json.dump(result, f, indent=2)
-    print("Saved to tests/_output/cfd_mesh_test.json")
+    rect = [[0, 0], [4, 0], [4, 0.5], [0, 0.5]]
+    r = generate_cfd_mesh(rect, wind_speed=25, mesh_size=0.2, far_field_factor=10)
+    print(f"Rect:  {r['stats']['n_nodes']} nodes, {r['stats']['n_elements']} elems, "
+          f"{r['stats']['n_quads']} quads, {r['stats']['bl_layers']} BL layers, "
+          f"y1={r['stats']['bl_first_layer_mm']:.3f} mm, corners={r['stats']['n_corners']}")
+
+    N = 40
+    yt = lambda x: (0.12/0.2)*(0.2969*x**0.5 - 0.126*x - 0.3516*x**2 + 0.2843*x**3 - 0.1015*x**4)
+    naca = []
+    for i in range(N+1):
+        x = (1 - math.cos(math.pi*i/N)) / 2
+        naca.append([round(x,4),  round(yt(x),4)])
+    for i in range(N, 0, -1):
+        x = (1 - math.cos(math.pi*i/N)) / 2
+        naca.append([round(x,4), -round(yt(x),4)])
+
+    a = generate_cfd_mesh(naca, wind_speed=90, mesh_size=0.02, far_field_factor=20)
+    print(f"NACA:  {a['stats']['n_nodes']} nodes, {a['stats']['n_elements']} elems, "
+          f"{a['stats']['n_quads']} quads, {a['stats']['bl_layers']} BL layers, "
+          f"y1={a['stats']['bl_first_layer_mm']:.3f} mm, corners={a['stats']['n_corners']}")

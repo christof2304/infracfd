@@ -536,7 +536,7 @@ select.p-input {
 select.p-input option { background: var(--bg-panel); }
 
 /* ── Animation controls ───────────────────────────────────── */
-#anim-bar {
+#anim-bar, #anim-bar-3d {
     display: none;
     position: absolute;
     bottom: 10px;
@@ -552,8 +552,19 @@ select.p-input option { background: var(--bg-panel); }
     pointer-events: all;
     white-space: nowrap;
 }
-#canvas-area.view-result #anim-bar { display: flex; }
-#anim-bar.hidden { display: none !important; }
+#canvas-area.view-result #anim-bar:not(.hidden) { display: flex; }
+#canvas-area.tab-3d.view-result #anim-bar-3d:not(.hidden) { display: flex; }
+#anim-bar.hidden, #anim-bar-3d.hidden { display: none !important; }
+
+#force-plot-3d {
+    width: 100%;
+    height: 80px;
+    display: none;
+    margin-top: 8px;
+    border-radius: 4px;
+    background: var(--bg-deep);
+    border: 1px solid var(--border);
+}
 
 .anim-btn {
     width: 26px; height: 26px;
@@ -675,7 +686,7 @@ select.p-input option { background: var(--bg-panel); }
         <div id="cb-unit"></div>
     </div>
 
-    <!-- Animation controls (transient only) -->
+    <!-- Animation controls (2D transient) -->
     <div id="anim-bar" class="hidden">
         <button class="anim-btn" id="anim-first" title="Erster Zeitschritt">⏮</button>
         <button class="anim-btn" id="anim-prev"  title="Zurück">◀</button>
@@ -684,6 +695,17 @@ select.p-input option { background: var(--bg-panel); }
         <button class="anim-btn" id="anim-last"  title="Letzter Zeitschritt">⏭</button>
         <input type="range" id="anim-slider" min="0" value="0">
         <span id="anim-time">t = 0 s</span>
+    </div>
+
+    <!-- Animation controls (3D transient) -->
+    <div id="anim-bar-3d" class="hidden">
+        <button class="anim-btn" id="anim3d-first" title="Erster Zeitschritt">⏮</button>
+        <button class="anim-btn" id="anim3d-prev"  title="Zurück">◀</button>
+        <button class="anim-btn" id="anim3d-play"  title="Abspielen">▶</button>
+        <button class="anim-btn" id="anim3d-next"  title="Vor">▶▶</button>
+        <button class="anim-btn" id="anim3d-last"  title="Letzter Zeitschritt">⏭</button>
+        <input type="range" id="anim3d-slider" min="0" value="0">
+        <span id="anim3d-time">t = 0 s</span>
     </div>
 
     <!-- Log overlay -->
@@ -859,9 +881,30 @@ select.p-input option { background: var(--bg-panel); }
                 oninput="document.getElementById('density-val-3d').textContent=this.value+'%'" style="accent-color:#44bb44">
             <div class="p-slider-row"><span>grob (schnell)</span><span>fein (langsam)</span></div>
 
-            <div class="p-row" style="margin-top:8px">
-                <label title="Maximale Solver-Iterationen (stationär). Mehr = genauer, aber langsamer. Stoppt früher, sobald konvergiert.">Iterationen</label>
-                <input type="number" id="iterations-3d" class="p-input" value="500" min="50" max="3000" step="50">
+            <div id="steady-opts-3d">
+                <div class="p-row" style="margin-top:8px">
+                    <label title="Maximale Solver-Iterationen (stationär). Mehr = genauer, aber langsamer. Stoppt früher, sobald konvergiert.">Iterationen</label>
+                    <input type="number" id="iterations-3d" class="p-input" value="500" min="50" max="3000" step="50">
+                </div>
+            </div>
+        </div>
+
+        <div class="p-section">
+            <div class="p-label">Simulation</div>
+            <div class="p-checkbox-row">
+                <input type="checkbox" id="transient-3d">
+                <label for="transient-3d">Instationär (pimpleFoam)</label>
+            </div>
+            <div id="transient-opts-3d" style="display:none" class="p-sub">
+                <div class="p-row">
+                    <label>Endzeit [s]</label>
+                    <input type="number" id="end-time-3d" class="p-input" value="5" min="0.5" max="300" step="0.5">
+                </div>
+                <div id="end-time-3d-hint" style="font-size:10px;color:var(--text-dim);margin-top:-2px;margin-bottom:4px"></div>
+                <div class="p-row">
+                    <label>Zeitschritt [s]</label>
+                    <input type="number" id="dt-3d" class="p-input" value="0.05" min="0.001" max="0.5" step="0.005">
+                </div>
             </div>
         </div>
 
@@ -881,7 +924,7 @@ select.p-input option { background: var(--bg-panel); }
                         Horizontal z =</label>
                     <span id="sl3d-hz-val" class="p-val" style="color:#3d9eff">—</span>
                 </div>
-                <input type="range" id="sl3d-hz" class="p-slider" min="0" max="1" step="0.01" value="0.5">
+                <input type="range" id="sl3d-hz" class="p-slider" min="0" max="1" step="0.01" value="0.25">
 
                 <!-- Vertikal (y) -->
                 <div class="p-row" style="margin-bottom:2px;margin-top:8px">
@@ -927,6 +970,18 @@ select.p-input option { background: var(--bg-panel); }
                             <label style="font-size:10px">Seeds</label>
                             <input type="number" id="sl3d-seeds" class="p-input" value="30" min="5" max="100" step="5">
                         </div>
+                    </div>
+                    <div class="p-checkbox-row">
+                        <input type="checkbox" id="show-surface-lines-3d" style="accent-color:var(--mint)">
+                        <label for="show-surface-lines-3d">Oberflächenstromlinien</label>
+                    </div>
+                </div>
+
+                <!-- Force coefficient time series (transient only) -->
+                <div id="force-plot-section-3d" style="display:none">
+                    <div class="p-section" style="margin-top:8px">
+                        <div class="p-label" style="margin-bottom:4px">Kraftbeiwerte Cd / Cl (t)</div>
+                        <canvas id="force-plot-3d"></canvas>
                     </div>
                 </div>
             </div>

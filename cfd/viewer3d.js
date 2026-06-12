@@ -240,7 +240,7 @@ export class Viewer3D {
             const boxWorld = new THREE.Box3().setFromObject(this._modelGroup);
             this._fitCamera3D(boxWorld);
             this.showWindArrow3D(boxWorld);
-            onProgress?.({ done: true, faces: this._countFaces(model) });
+            onProgress?.({ done: true, faces: this._countFaces(model), box: boxWorld });
         }, xhr => {
             if (xhr.total) onProgress?.({ pct: xhr.loaded / xhr.total });
         }, err => {
@@ -301,6 +301,16 @@ export class Viewer3D {
         // Normalise triangles → array of [i, j, k] (array indices)
         const triIndices = _normaliseTris(field.triangles, idToIdx);
 
+        // Split quads into 2 triangles each so BL rows are rendered
+        if (field.quads?.length) {
+            for (const q of field.quads) {
+                const ns = Array.isArray(q) ? q : q.nodes;
+                const [a, b, c, d] = ns.map(id => idToIdx.has(id) ? idToIdx.get(id) : -1);
+                if (a >= 0 && b >= 0 && c >= 0 && d >= 0)
+                    triIndices.push([a, b, c], [a, c, d]);
+            }
+        }
+
         // Fill mesh
         const pos = new Float32Array(triIndices.length * 3 * 3);
         let vi = 0;
@@ -331,7 +341,7 @@ export class Viewer3D {
         this._cfdGroup.add(new THREE.LineSegments(edgeGeom,
             new THREE.LineBasicMaterial({ color: 0x2a5090, transparent: true, opacity: 0.55 })));
 
-        // Set up ortho mode — caller sets the actual zoom via syncViewWithSVG()
+        // Set up ortho mode — caller positions camera via fitOrthoView() or syncViewWithSVG()
         this._initOrthoMode();
     }
 
@@ -513,8 +523,7 @@ export class Viewer3D {
         if (col) col.visible = visible;
         const vec = this._slices?.[sliceId + '_vec'];
         if (vec) vec.visible = visible;
-        const sl = this._sliceStreamGroups?.[sliceId];
-        if (sl) sl.visible = visible;
+        // Streamlines are independent of plane visibility — controlled by their own checkbox.
     }
 
     _removeSlicePlane(id) {
@@ -947,6 +956,25 @@ export class Viewer3D {
     clear3DResult() {
         this.clearSlices();
         this._clearStreamlines();
+    }
+
+    // Fit the orthographic camera to a world-space region centred at (cx,cy).
+    // halfSize: half the visible height in world units.
+    fitOrthoView(cx, cy, halfSize) {
+        if (!this._orthoCamera) return;
+        const aspect = this.canvas.clientWidth / Math.max(this.canvas.clientHeight, 1);
+        this._orthoCamera.zoom   = 1;
+        this._orthoCamera.left   = -halfSize * aspect;
+        this._orthoCamera.right  =  halfSize * aspect;
+        this._orthoCamera.top    =  halfSize;
+        this._orthoCamera.bottom = -halfSize;
+        this._orthoCamera.position.set(cx, cy, 100);
+        this._orthoCamera.updateProjectionMatrix();
+        this._orthoSize = halfSize;
+        if (this._controls) {
+            this._controls.target.set(cx, cy, 0);
+            this._controls.update();
+        }
     }
 
     // ── Sync camera to SVG view ───────────────────────────────────
@@ -1457,6 +1485,50 @@ export class Viewer3D {
             }
         });
         this._cfdGroup.clear();
+    }
+
+    clearSurfaceStreamlines() {
+        if (this._surfaceLinesObj) {
+            this._cfdGroup.remove(this._surfaceLinesObj);
+            this._surfaceLinesObj.geometry.dispose();
+            this._surfaceLinesObj.material.dispose();
+            this._surfaceLinesObj = null;
+        }
+    }
+
+    // lines: array of polylines [[x,y,z], ...]  in OpenFOAM Z-up coordinates
+    // ofCenter: {x,y,z} offset in OF space to subtract before conversion (GLB centering)
+    showSurfaceStreamlines(lines, ofCenter = null) {
+        this.clearSurfaceStreamlines();
+        if (!lines?.length) return;
+
+        const cx = ofCenter?.x ?? 0;
+        const cy = ofCenter?.y ?? 0;
+        const cz = ofCenter?.z ?? 0;
+
+        // Build LineSegments: each consecutive pair in each polyline becomes a segment
+        // OF→Three.js: (x,y,z)→(x,z,-y)  then subtract center
+        const positions = [];
+        for (const line of lines) {
+            for (let i = 0; i < line.length - 1; i++) {
+                const [x0, y0, z0] = line[i];
+                const [x1, y1, z1] = line[i + 1];
+                positions.push(x0 - cx, z0 - cz, -(y0 - cy),
+                               x1 - cx, z1 - cz, -(y1 - cy));
+            }
+        }
+        if (!positions.length) return;
+
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3));
+        const mat = new THREE.LineBasicMaterial({
+            color: 0xffffff,
+            transparent: true,
+            opacity: 0.65,
+        });
+        this._surfaceLinesObj = new THREE.LineSegments(geo, mat);
+        this._surfaceLinesObj.renderOrder = 4;
+        this._cfdGroup.add(this._surfaceLinesObj);
     }
 
     clear() {

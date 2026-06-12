@@ -13,6 +13,7 @@ Then open: http://localhost:8000/cfd/
 import os
 import sys
 import json
+import math
 import queue
 import threading
 from pathlib import Path
@@ -26,6 +27,20 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 app = FastAPI(title="infraCFD", version="0.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request as _Req
+
+class NoCacheMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: _Req, call_next):
+        response = await call_next(request)
+        p = request.url.path
+        if p.endswith(('.js', '.css', '.html')) or p == '/cfd/' or p == '/':
+            response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate'
+            response.headers['Pragma'] = 'no-cache'
+        return response
+
+app.add_middleware(NoCacheMiddleware)
 
 # Static files
 CFD_DIR   = PROJECT_ROOT / "cfd"
@@ -83,16 +98,21 @@ def cfd_mesh(body: dict):
     mesh_size  = body.get("meshSize", 0.2)
     far_field  = body.get("farFieldFactor", 15)
     wind_angle = body.get("windAngle", 0)
+    wind_speed = body.get("windSpeed", None)   # optional — improves BL sizing
+    structured = body.get("structured", False)
 
     input_data = json.dumps({"polygon": polygon, "meshSize": mesh_size,
-                              "farFieldFactor": far_field, "windAngle": wind_angle})
+                              "farFieldFactor": far_field, "windAngle": wind_angle,
+                              "windSpeed": wind_speed, "structured": structured})
     script = f"""
 import json, sys
 sys.path.insert(0, r'{PROJECT_ROOT}')
 from tools.cfd_mesh import generate_cfd_mesh
 data = json.loads('''{input_data}''')
+ws = data['windSpeed']
 result = generate_cfd_mesh(data['polygon'], wind_angle=data['windAngle'],
-    mesh_size=data['meshSize'], far_field_factor=data['farFieldFactor'])
+    mesh_size=data['meshSize'], far_field_factor=data['farFieldFactor'],
+    wind_speed=ws if ws else None, structured=data['structured'])
 print(json.dumps(result))
 """
     try:
@@ -141,6 +161,7 @@ def cfd_solve(body: dict):
     dt         = body.get("dt", 0.002)
     bl_layers  = int(body.get("blLayers", 4))
     bl_ratio   = float(body.get("blRatio", 1.4))
+    structured = body.get("structured", False)
 
     import tempfile
     case_dir = tempfile.mkdtemp(prefix="cfd_")
@@ -152,23 +173,29 @@ def cfd_solve(body: dict):
     _cfd_status["result"]  = None
 
     script = f"""
-import sys, json
+import sys, json, traceback
 sys.path.insert(0, r'{PROJECT_ROOT}')
 from tools.cfd_mesh import generate_cfd_mesh
 from tools.cfd_openfoam import create_openfoam_case, run_openfoam, parse_cfd_results
 
-polygon = {json.dumps(polygon)}
-mesh = generate_cfd_mesh(polygon, mesh_size={mesh_size}, far_field_factor={far_field})
-case = create_openfoam_case(mesh, wind_speed={wind_speed}, wind_angle={wind_angle},
-    output_dir=r'{case_dir}', transient={transient}, end_time={end_time}, dt={dt})
-result = run_openfoam(case, polygon, mesh_size={mesh_size}, far_field_factor={far_field},
-    bl_layers={bl_layers}, bl_ratio={bl_ratio})
-result["stats"]    = mesh["stats"]
-result["case_dir"] = r'{case_dir}'
-field_data = parse_cfd_results(r'{case_dir}', section_polygon=polygon)
-if field_data:
-    result["field"] = field_data
-print(json.dumps(result))
+try:
+    polygon = {json.dumps(polygon)}
+    mesh = generate_cfd_mesh(polygon, mesh_size={mesh_size}, far_field_factor={far_field},
+        wind_speed={wind_speed}, structured={structured})
+    case = create_openfoam_case(mesh, wind_speed={wind_speed}, wind_angle={wind_angle},
+        output_dir=r'{case_dir}', transient={transient}, end_time={end_time}, dt={dt})
+    result = run_openfoam(case, polygon, mesh_size={mesh_size}, far_field_factor={far_field},
+        bl_layers={bl_layers}, bl_ratio={bl_ratio},
+        structured={structured}, wind_speed={wind_speed})
+    result["stats"]    = mesh["stats"]
+    result["case_dir"] = r'{case_dir}'
+    field_data = parse_cfd_results(r'{case_dir}', section_polygon=polygon)
+    if field_data:
+        result["field"] = field_data
+    print(json.dumps(result))
+except Exception as _e:
+    print("SCRIPT_ERROR: " + traceback.format_exc())
+    print(json.dumps({{"success": False, "error": str(_e)}}))
 """
     try:
         proc = sp.Popen([sys.executable, "-c", script], stdout=sp.PIPE, stderr=sp.STDOUT, text=True, bufsize=1)
@@ -176,7 +203,7 @@ print(json.dumps(result))
         for line in proc.stdout:
             line = line.rstrip()
             output_lines.append(line)
-            if any(kw in line for kw in ["Time =", "Cd:", "Cl:", "===", "Mesh", "Re =", "FOAM", "End"]):
+            if any(kw in line for kw in ["Time =", "Cd:", "Cl:", "===", "Mesh", "Re =", "FOAM", "End", "Error", "error", "Traceback", "SCRIPT_ERROR", "failed", "Failed"]):
                 _cfd_log_queue.put(line)
         proc.wait()
         _cfd_status["running"] = False
@@ -229,8 +256,8 @@ def cfd_timestep(body: dict):
 
     if field_name == "speed" and velocity:
         cell_values = [math.sqrt(v[0]**2 + v[1]**2 + v[2]**2) for v in velocity]
-    elif field_name == "vorticity" and vorticity_vec:
-        cell_values = [v[2] for v in vorticity_vec]
+    elif field_name == "vorticity":
+        cell_values = [v[2] for v in vorticity_vec] if vorticity_vec else []
     elif field_name == "turb_k":
         cell_values = _parse_of_scalar_field(time_dir / "k") or []
     else:
@@ -300,11 +327,23 @@ def cfd_solve3d(body: dict):
     z0            = body.get("z0", 0.1)
     mesh_size     = body.get("meshSize", None)
     n_iterations  = body.get("nIterations", 500)
-    n_procs       = body.get("nProcs", 4)  # server has 8 cores; run parallel (falls back to serial)
+    n_procs       = body.get("nProcs", 6)  # Ryzen AI 9 HX 370 has 12 cores; falls back to serial if MPI unavailable
     domain_factor = body.get("domainFactor", 3)
+    flow_type     = body.get("flowType", "abl")   # 'abl' or 'channel'
+    transient     = bool(body.get("transient", False))
+    _t_conv       = domain_factor * height / max(wind_speed, 0.1)
+    end_time      = float(body.get("endTime") or math.ceil(_t_conv * 2))
+    dt            = float(body.get("dt", 0.05))
 
     max_height = max(b["height"] for b in buildings) if buildings else height
     buildings_json = json.dumps(buildings) if buildings else "None"
+
+    # Channel flow uses fixed domain proportions matching Martinuzzi & Tropea (1993)
+    if flow_type == "channel":
+        domain_factors_py = {"upstream": 4, "downstream": 12, "lateral": 1.8, "top": 3.6}
+    else:
+        domain_factors_py = {"upstream": domain_factor, "downstream": domain_factor * 2.5,
+                              "lateral": domain_factor, "top": domain_factor}
 
     _cfd_status["running"] = True
     _cfd_status["result"]  = None
@@ -319,13 +358,14 @@ buildings = {buildings_json}
 case_dir  = create_openfoam_case_3d(
     footprint, height={max_height}, wind_speed={wind_speed},
     wind_angle={wind_angle}, z0={z0}, n_iterations={n_iterations},
-    n_procs={n_procs}, buildings=buildings)
+    n_procs={n_procs}, buildings=buildings,
+    transient={transient}, end_time={end_time}, dt={dt},
+    flow_type='{flow_type}')
 
-domain_factors = {{"upstream": {domain_factor}, "downstream": {domain_factor}*2.5,
-                   "lateral": {domain_factor}, "top": {domain_factor}}}
+domain_factors = {json.dumps(domain_factors_py)}
 result = run_openfoam_3d(case_dir, footprint, height={max_height},
     mesh_size={mesh_size if mesh_size else 'None'}, n_procs={n_procs},
-    domain_factors=domain_factors, buildings=buildings)
+    domain_factors=domain_factors, buildings=buildings, transient={transient})
 result["case_dir"]       = case_dir
 result["mode"]           = "3d"
 result["building_height"] = {max_height}
@@ -405,11 +445,16 @@ def cfd_solve3d_stl(body: dict):
     scale         = float(body.get("stlScale", 1.0))
     wind_speed    = float(body.get("windSpeed", 10))
     wind_angle    = float(body.get("windAngle", 0))
+    building_height = float(body.get("buildingHeight", 40))
     z0            = float(body.get("z0", 0.1))
     domain_factor = float(body.get("domainFactor", 3))
     n_iterations  = int(body.get("nIterations", 500))
-    n_procs       = int(body.get("nProcs", 4))
+    n_procs       = int(body.get("nProcs", 6))
     mesh_size     = body.get("meshSize", None)  # near-wall cell size (None → auto char_dim/20)
+    transient     = bool(body.get("transient", False))
+    _t_conv       = domain_factor * building_height / max(wind_speed, 0.1)
+    end_time      = float(body.get("endTime") or math.ceil(_t_conv * 2))
+    dt            = float(body.get("dt", 0.05))
 
     case_dir = tempfile.mkdtemp(prefix="cfd3dstl_")
 
@@ -428,8 +473,9 @@ from tools.cfd_openfoam import prepare_stl_case, run_openfoam_3d_stl
 prep = prepare_stl_case(r'{model_file}', r'{case_dir}', scale={scale},
     wind_speed={wind_speed}, z0={z0}, domain_factor={domain_factor},
     n_procs={n_procs}, n_iterations={n_iterations}, rot_z={-wind_angle},
-    mesh_size={mesh_size if mesh_size else 'None'})
-result = run_openfoam_3d_stl(r'{case_dir}', n_procs={n_procs})
+    mesh_size={mesh_size if mesh_size else 'None'},
+    transient={transient}, end_time={end_time}, dt={dt})
+result = run_openfoam_3d_stl(r'{case_dir}', n_procs={n_procs}, transient={transient})
 result["case_dir"]        = r'{case_dir}'
 result["mode"]            = "3d"
 result["bbox"]            = prep.get("bounds")
@@ -477,7 +523,8 @@ def cfd_slice3d(body: dict):
 
     from tools.cfd_openfoam import extract_slice
     result = extract_slice(case_dir, plane=body.get("plane", "z"),
-                           value=body.get("value", 0), field=body.get("field", "pressure"))
+                           value=body.get("value", 0), field=body.get("field", "pressure"),
+                           time_step=body.get("timeStep", None))
     if not result:
         raise HTTPException(status_code=404, detail="No data for this slice")
     return result
@@ -495,6 +542,22 @@ def cfd_streamlines3d(body: dict):
                                  seed_z_min=body.get("seedZmin", 0.0),
                                  seed_z_max=body.get("seedZmax", 1.0))
     return {"streamlines": lines, "count": len(lines)}
+
+
+@app.post("/api/cfd/surface-lines")
+def cfd_surface_lines(body: dict):
+    """Extract surface streamlines from wallShearStress on building boundary patches."""
+    case_dir = body.get("caseDir", "")
+    if not case_dir or not os.path.isdir(case_dir):
+        raise HTTPException(status_code=400, detail="Invalid case directory")
+
+    from tools.cfd_openfoam import extract_surface_streamlines
+    lines = extract_surface_streamlines(
+        case_dir,
+        n_seeds=int(body.get("nSeeds", 40)),
+        n_steps=int(body.get("nSteps", 200)),
+    )
+    return {"lines": lines, "count": len(lines)}
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

@@ -285,6 +285,21 @@ export const CFD_TEST_CASES = [
         expected: { cD: "multi-building", cL: "variable", cM: "variable" },
     },
 
+    // ── OpenFOAM Validierungsfall ────────────────────────────────
+    {
+        name: "Würfel Martinuzzi & Tropea (3D)",
+        desc: "Aufgesetzter Würfel, Kanalströmung, Re_H=40000 (Martinuzzi & Tropea 1993)",
+        mode: '3d',
+        height: 1,
+        z0: 0,
+        flowType: 'channel',
+        polygon: [[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]],
+        windSpeed: 0.6,   // Re_H = U_H·H/ν = 0.6·1/1.5e-5 = 40 000
+        meshSize: 0.06,
+        farField: 4,
+        expected: { cD: "~1.0–1.4", cL: "~0", cM: "~0" },
+    },
+
     // ── Dolfyn Gebäude 2D ───────────────────────────────────────
     {
         name: "Zwei Häuser (Dolfyn 2D)",
@@ -347,5 +362,39 @@ export const CFD_TEST_CASES = [
         meshSize: 0.5,
         farField: 12,
         expected: { cD: "~0.3-0.5", cL: "~0.1", cM: "Dolfyn ref" },
+    },
+
+    // ── OpenFOAM Validierungsfall 2D ─────────────────────────────
+    {
+        name: "NACA0012 (2D)",
+        desc: "Tragflügelprofil c=1m, Re=6×10⁶. Anströmwinkel = Anstellwinkel α. (Gregory & O'Reilly 1970)",
+        polygon: (() => {
+            const N = 40;
+            const yt = x => (0.12 / 0.2) * (
+                0.2969 * Math.sqrt(x)
+                - 0.126  * x
+                - 0.3516 * x * x
+                + 0.2843 * x * x * x
+                - 0.1015 * x * x * x * x
+            );
+            const r = v => Math.round(v * 1e4) / 1e4;
+            const pts = [];
+            // Upper surface: LE (i=0) → TE (i=N), cosine spacing
+            for (let i = 0; i <= N; i++) {
+                const x = (1 - Math.cos(Math.PI * i / N)) / 2;
+                pts.push([r(x),  r(yt(x))]);
+            }
+            // Lower surface: TE (i=N) → near-LE (i=1), skip LE to avoid duplicate
+            for (let i = N; i >= 1; i--) {
+                const x = (1 - Math.cos(Math.PI * i / N)) / 2;
+                pts.push([r(x), -r(yt(x))]);
+            }
+            return pts;
+        })(),
+        windSpeed: 90,    // Re = U·c/ν = 90·1/1.5e-5 = 6×10⁶
+        meshSize: 0.02,
+        farField: 20,
+        structured: true,
+        expected: { cD: "~0.006–0.008", cL: "~0 (α=0°)", cM: "~0" },
     },
 ];

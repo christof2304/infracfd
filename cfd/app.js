@@ -24,16 +24,25 @@ class CFDApp {
         this._viewMode = 'draw';
         this._polygon  = null;
 
-        // Animation state
+        // 2D animation state
         this._animTimeSteps = [];
         this._animIdx       = 0;
         this._animPlaying   = false;
         this._animTimer     = null;
         this._animCaseDir   = null;
         this._animFps       = 4;
+
+        // 3D animation state
+        this._anim3dTimeSteps = [];
+        this._anim3dIdx       = 0;
+        this._anim3dPlaying   = false;
+        this._anim3dTimer     = null;
+        this._anim3dCache     = [];   // [{hz, vt}] per frame
+        this._anim3dFps       = 4;
         this._glbUrl  = null;
         this._glbScale = 1;
         this._glbBounds = null;
+        this._glbName   = null;
         this._meshData  = null;
         this._solveResult = null;
         this._solving = false;
@@ -90,6 +99,8 @@ class CFDApp {
         document.getElementById('cp-chart-wrap').style.display = 'none';
         document.getElementById('statusbar-stats').style.display = 'none';
         document.getElementById('show-streamlines-3d').checked = false;
+        document.getElementById('show-surface-lines-3d').checked = false;
+        this._viewer?.clearSurfaceStreamlines?.();
         this._animStop?.();
         this._animTimeSteps = [];
         document.getElementById('anim-bar').classList.add('hidden');
@@ -166,6 +177,7 @@ class CFDApp {
     _loadCase(idx) {
         const tc = CFD_TEST_CASES[idx];
         if (!tc || tc.mode === '3d') return;
+        this._tc2d = tc;
         this._draw.setPolygon(tc.polygon);
         document.getElementById('wind-speed').value = tc.windSpeed;
         document.getElementById('wind-angle').value = 0;
@@ -191,18 +203,20 @@ class CFDApp {
         this._3dCaseDir = null;
         this._lastSlice = null;
         document.getElementById('result-controls-3d').style.display = 'none';
+        const angle0 = parseFloat(document.getElementById('wind-angle-3d').value) || 0;
         if (tc.buildings?.length > 1) {
-            this._showMultiBuildingPreview(tc.buildings);
+            this._showMultiBuildingPreview(tc.buildings, angle0);
         } else {
-            this._showFootprintPreview(tc.polygon, maxH);
+            this._showFootprintPreview(tc.polygon, maxH, angle0);
         }
     }
 
-    _showMultiBuildingPreview(buildings) {
+    _showMultiBuildingPreview(buildings, windAngle = 0) {
         const colors = [0x2a4a8a, 0x2a7a4a, 0x7a4a2a, 0x7a2a6a, 0x4a7a2a];
         let allXs = [], allYs = [], maxH = 0;
         buildings.forEach((b, i) => {
-            const pts2d = b.footprint.map(([x, y]) => new THREE.Vector2(x, y));
+            const rotFp = this._rotatePoly2D(b.footprint, windAngle);
+            const pts2d = rotFp.map(([x, y]) => new THREE.Vector2(x, y));
             const shape  = new THREE.Shape(pts2d);
             const geom   = new THREE.ExtrudeGeometry(shape, { depth: b.height, bevelEnabled: false });
             geom.rotateX(-Math.PI / 2);
@@ -211,14 +225,14 @@ class CFDApp {
             const edges = new THREE.LineSegments(new THREE.EdgesGeometry(geom),
                 new THREE.LineBasicMaterial({ color: 0x3d9eff, opacity: 0.7, transparent: true }));
             this._viewer._modelGroup.add(mesh, edges);
-            b.footprint.forEach(([x, y]) => { allXs.push(x); allYs.push(y); });
+            rotFp.forEach(([x, y]) => { allXs.push(x); allYs.push(y); });
             if (b.height > maxH) maxH = b.height;
         });
 
         const box = new THREE.Box3().setFromObject(this._viewer._modelGroup);
         this._viewer._fitCamera3D(box);
         this._3dModelBox = box;
-        this._viewer.showWindArrow3D(box, parseFloat(document.getElementById('wind-angle-3d').value) || 0);
+        this._viewer.showWindArrow3D(box, windAngle);
 
         const bw = Math.max(...allXs) - Math.min(...allXs);
         const bd = Math.max(...allYs) - Math.min(...allYs);
@@ -230,8 +244,22 @@ class CFDApp {
         this._init3DSlicePlanes();
     }
 
-    _showFootprintPreview(polygon, height) {
-        const pts2d = polygon.map(([x, y]) => new THREE.Vector2(x, y));
+    // Rotate 2D polygon by -angleDeg around its centroid (mirrors CFD rotation).
+    _rotatePoly2D(polygon, angleDeg) {
+        if (Math.abs(angleDeg) < 0.01) return polygon;
+        const rad = angleDeg * Math.PI / 180;
+        const cx = polygon.reduce((s, p) => s + p[0], 0) / polygon.length;
+        const cy = polygon.reduce((s, p) => s + p[1], 0) / polygon.length;
+        const cos = Math.cos(-rad), sin = Math.sin(-rad);
+        return polygon.map(([x, y]) => [
+            cx + (x - cx) * cos - (y - cy) * sin,
+            cy + (x - cx) * sin + (y - cy) * cos,
+        ]);
+    }
+
+    _showFootprintPreview(polygon, height, windAngle = 0) {
+        const rotPoly = this._rotatePoly2D(polygon, windAngle);
+        const pts2d = rotPoly.map(([x, y]) => new THREE.Vector2(x, y));
         const shape  = new THREE.Shape(pts2d);
         const geom   = new THREE.ExtrudeGeometry(shape, { depth: height, bevelEnabled: false });
         geom.rotateX(-Math.PI / 2);
@@ -244,10 +272,10 @@ class CFDApp {
         const box = new THREE.Box3().setFromObject(mesh);
         this._viewer._fitCamera3D(box);
         this._3dModelBox = box;
-        this._viewer.showWindArrow3D(box, parseFloat(document.getElementById('wind-angle-3d').value) || 0);
+        this._viewer.showWindArrow3D(box, windAngle);
 
-        // Estimate domain bbox from footprint + height
-        const xs = polygon.map(p => p[0]), ys = polygon.map(p => p[1]);
+        // Estimate domain bbox from rotated footprint + height
+        const xs = rotPoly.map(p => p[0]), ys = rotPoly.map(p => p[1]);
         const bw = Math.max(...xs) - Math.min(...xs);
         const bd = Math.max(...ys) - Math.min(...ys);
         const dom = Math.max(bw, bd) * 3;
@@ -258,6 +286,22 @@ class CFDApp {
 
         // Show slice planes immediately
         this._init3DSlicePlanes();
+    }
+
+    // Re-render the footprint building model with updated wind angle (angle input changes).
+    // Only rebuilds the model geometry; preserves existing CFD slice results.
+    _refreshBuildingPreview(windAngle) {
+        if (this._glbUrl) return;  // GLB case: model is already loaded, no footprint to re-rotate
+        const tc = this._tc3d;
+        if (!tc) return;
+        const maxH = tc.buildings ? Math.max(...tc.buildings.map(b => b.height)) : tc.height;
+        // Clear only the model group (building mesh), not CFD slices / streamlines
+        this._viewer._clearModel?.();
+        if (tc.buildings?.length > 1) {
+            this._showMultiBuildingPreview(tc.buildings, windAngle);
+        } else {
+            this._showFootprintPreview(tc.polygon, maxH, windAngle);
+        }
     }
 
     _init3DSlicePlanes() {
@@ -324,18 +368,21 @@ class CFDApp {
                 const data = await res.json();
                 this._glbUrl    = data.url;
                 this._glbBounds = data.bounds;
+                this._glbName   = file.name;
                 this._glbScale  = parseFloat(scale.value) || 1;
-                const b = data.bounds;
-                const dx = ((b.max[0] - b.min[0]) * this._glbScale).toFixed(1);
-                const dy = ((b.max[1] - b.min[1]) * this._glbScale).toFixed(1);
-                const dz = ((b.max[2] - b.min[2]) * this._glbScale).toFixed(1);
-                document.getElementById('glb-info').textContent = `${file.name}  ${dx}×${dy}×${dz} m`;
-                document.getElementById('building-height').value = Math.round(data.height);
+                this._updateGlbInfo();
                 this._viewer.clear();
-                this._viewer.loadGLB(API_BASE + data.url, this._glbScale, ({ done, pct, error }) => {
-                    if (error) this._setStatus(`Fehler: ${error}`, 'error');
-                    else if (done) this._setStatus(`Modell geladen`);
-                    else this._setStatus(`Laden ${Math.round((pct || 0) * 100)}%`);
+                this._viewer.loadGLB(API_BASE + data.url, this._glbScale, ({ done, pct, error, box }) => {
+                    if (error) { console.error('[GLB] load error:', error); this._setStatus(`Fehler: ${error}`, 'error'); }
+                    else if (done) {
+                        this._setStatus(`Modell geladen`);
+                        this._setBboxFromGlbBounds();
+                        if (box) {
+                            this._3dModelBox = box;
+                            const angle = parseFloat(document.getElementById('wind-angle-3d').value) || 0;
+                            this._viewer.showWindArrow3D(box, angle);
+                        }
+                    } else this._setStatus(`Laden ${Math.round((pct || 0) * 100)}%`);
                 });
             } catch (e) {
                 this._setStatus(`Upload-Fehler: ${e.message}`, 'error');
@@ -345,9 +392,47 @@ class CFDApp {
         document.getElementById('btn-apply-scale').addEventListener('click', () => {
             if (!this._glbUrl) return;
             this._glbScale = parseFloat(scale.value) || 1;
+            this._updateGlbInfo();
+            this._setBboxFromGlbBounds();
             this._viewer.clear();
-            this._viewer.loadGLB(API_BASE + this._glbUrl, this._glbScale);
+            this._viewer.loadGLB(API_BASE + this._glbUrl, this._glbScale, ({ done, box }) => {
+                if (done && box) {
+                    this._3dModelBox = box;
+                    const angle = parseFloat(document.getElementById('wind-angle-3d').value) || 0;
+                    this._viewer.showWindArrow3D(box, angle);
+                }
+            });
         });
+    }
+
+    _updateGlbInfo() {
+        if (!this._glbBounds) return;
+        const b = this._glbBounds, s = this._glbScale;
+        const dx = ((b.max[0] - b.min[0]) * s).toFixed(1);
+        const dy = ((b.max[1] - b.min[1]) * s).toFixed(1);
+        const dz = ((b.max[2] - b.min[2]) * s).toFixed(1);
+        if (this._glbName)
+            document.getElementById('glb-info').textContent = `${this._glbName}  ${dx}×${dy}×${dz} m`;
+        document.getElementById('building-height').value = Math.round(parseFloat(dz));
+    }
+
+    // Compute OF bbox (Z-up, centered at origin like the loaded model) from stored _glbBounds.
+    // loadGLB always centers the model at origin, so each axis spans [-half, +half].
+    // trimesh Z-up → OF Z-up: X=X, Y=Y, Z=Z (same convention, just centered).
+    _setBboxFromGlbBounds() {
+        const b = this._glbBounds;
+        if (!b) return;
+        const s = this._glbScale;
+        const hw = (b.max[0] - b.min[0]) * s / 2;
+        const hd = (b.max[1] - b.min[1]) * s / 2;
+        const hh = (b.max[2] - b.min[2]) * s / 2;
+        // No domain expansion here — size ghost planes to model bounds only.
+        // After CFD, result.bbox (with full domain) replaces this.
+        this._3dBbox = {
+            min: [-hw, -hd, -hh],
+            max: [ hw,  hd,  hh + s * 5],
+        };
+        this._init3DSlicePlanes();
     }
 
     // ── controls ──────────────────────────────────────────────────
@@ -379,6 +464,7 @@ class CFDApp {
         document.getElementById('btn-clear').addEventListener('click', () => {
             this._draw.clear();
             this._polygon = null;
+            this._tc2d = null;
             this._resetResult();
             this._updateRunBtn();
         });
@@ -393,11 +479,28 @@ class CFDApp {
         document.getElementById('btn-clear-2d').addEventListener('click', () => this._resetResult());
         document.getElementById('btn-clear-3d').addEventListener('click', () => this._resetResult());
 
-        // Transient checkbox
+        // Transient checkbox (2D)
         const transientCb = document.getElementById('transient');
         const transientOpts = document.getElementById('transient-opts');
         transientCb.addEventListener('change', () => {
             transientOpts.style.display = transientCb.checked ? 'block' : 'none';
+        });
+
+        // Transient checkbox (3D)
+        const transientCb3d = document.getElementById('transient-3d');
+        const transientOpts3d = document.getElementById('transient-opts-3d');
+        const steadyOpts3d   = document.getElementById('steady-opts-3d');
+        transientCb3d.addEventListener('change', () => {
+            const on = transientCb3d.checked;
+            transientOpts3d.style.display = on ? 'block' : 'none';
+            steadyOpts3d.style.display    = on ? 'none'  : 'block';
+            if (on) this._updateEndTimeHint(true);
+        });
+
+        // Auto-update end-time hint when relevant inputs change
+        ['building-height', 'wind-speed-3d', 'domain-size-3d'].forEach(id => {
+            const el = document.getElementById(id);
+            if (el) el.addEventListener('input', () => this._updateEndTimeHint(false));
         });
 
         // Result field selector
@@ -471,12 +574,11 @@ class CFDApp {
             this._showResultField(document.getElementById('result-field').value);
         });
 
-        // 3D wind angle — update arrow live
+        // 3D wind angle — update arrow and building preview orientation live
         document.getElementById('wind-angle-3d').addEventListener('input', () => {
-            if (this._3dModelBox) {
-                const angle = parseFloat(document.getElementById('wind-angle-3d').value) || 0;
-                this._viewer.showWindArrow3D(this._3dModelBox, angle);
-            }
+            const angle = parseFloat(document.getElementById('wind-angle-3d').value) || 0;
+            if (this._3dModelBox) this._viewer.showWindArrow3D(this._3dModelBox, angle);
+            this._refreshBuildingPreview(angle);
         });
 
         // GLB upload
@@ -512,13 +614,15 @@ class CFDApp {
         const density    = parseInt(document.getElementById('mesh-density').value) || 50;
         const domainSize = parseFloat(document.getElementById('domain-size').value) || 15;
         const windAngle  = parseFloat(document.getElementById('wind-angle').value) || 0;
+        const windSpeed  = parseFloat(document.getElementById('wind-speed').value) || null;
         const meshSize   = 0.5 * (1 - density / 100) + 0.05;
 
         try {
             const res = await fetch(api('/api/cfd/mesh'), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ polygon: this._polygon, windAngle, meshSize, farField: domainSize })
+                body: JSON.stringify({ polygon: this._polygon, windAngle, windSpeed, meshSize, farField: domainSize,
+                    structured: this._tc2d?.structured ?? false })
             });
             if (!res.ok) throw new Error(await res.text());
             const data = await res.json();
@@ -528,12 +632,14 @@ class CFDApp {
             // The mesh endpoint returns {nodes: [...], triangles: [...], stats: {...}}
             // Convert to the field format expected by showMeshOnly
             const fakeResult = { field: data };
-            this._setStatus(`Mesh: ${data.stats?.n_nodes ?? '?'} Knoten, ${data.stats?.n_triangles ?? '?'} Dreiecke`, 'ok');
+            const nq = data.stats?.n_quads ?? 0;
+            const blInfo = nq > 0 ? `, ${nq} BL-Quads (${data.stats?.bl_layers} Lagen, y₁=${data.stats?.bl_first_layer_mm} mm)` : '';
+            this._setStatus(`Mesh: ${data.stats?.n_nodes ?? '?'} Knoten, ${data.stats?.n_triangles ?? '?'} Dreiecke${blInfo}`, 'ok');
             this._appendLog(`✓ Mesh erzeugt: ${data.stats?.n_nodes} Knoten, ${data.stats?.n_triangles} Dreiecke`);
 
             this._viewer.showMeshOnly(fakeResult);
             this._viewer.showPolygon(this._polygon);
-            this._viewer.syncViewWithSVG(this._draw.getViewState());
+            this._fitViewToMesh();
             document.getElementById('log-panel').style.display = 'none';
             document.getElementById('result-panel').style.display = 'block';
             document.getElementById('result-field').value = 'mesh';
@@ -585,12 +691,16 @@ class CFDApp {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     polygon: this._polygon,
-                    windAngle, meshSize, farField: domainSize
+                    windAngle, meshSize, farField: domainSize,
+                    structured: this._tc2d?.structured ?? false
                 })
             });
             if (!meshRes.ok) throw new Error(await meshRes.text());
             this._meshData = await meshRes.json();
-            this._appendLog(`Mesh: ${this._meshData.stats?.n_nodes ?? '?'} Knoten, ${this._meshData.stats?.n_triangles ?? '?'} Dreiecke`);
+            const _nq = this._meshData.stats?.n_quads ?? 0;
+            const _nt = this._meshData.stats?.n_triangles ?? 0;
+            const _cellInfo = _nq > 0 ? `${_nq} Quads` : `${_nt} Dreiecke`;
+            this._appendLog(`Mesh: ${this._meshData.stats?.n_nodes ?? '?'} Knoten, ${_cellInfo}`);
         } catch (e) {
             this._appendLog(`Mesh-Fehler: ${e.message}`);
             this._setStatus('Mesh-Fehler', 'error');
@@ -609,7 +719,8 @@ class CFDApp {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     polygon: this._polygon, windSpeed, windAngle,
-                    meshSize, farField: domainSize, transient, endTime, dt
+                    meshSize, farField: domainSize, transient, endTime, dt,
+                    structured: this._tc2d?.structured ?? false
                 })
             });
             if (!solveRes.ok) throw new Error(await solveRes.text());
@@ -644,6 +755,9 @@ class CFDApp {
         const z0         = parseFloat(document.getElementById('roughness').value) || 0.1;
         const domainMul  = parseFloat(document.getElementById('domain-size-3d').value) || 3;
         const nIterations = parseInt(document.getElementById('iterations-3d').value) || 500;
+        const transient3d = document.getElementById('transient-3d').checked;
+        const endTime3d   = parseFloat(document.getElementById('end-time-3d').value) || 5;
+        const dt3d        = parseFloat(document.getElementById('dt-3d').value) || 0.05;
         // Mesh density 10..100% → near-wall cell size = H / factor (15 coarse .. 40 fine).
         // 50% ≈ H/26 ≈ the backend default (H/25), so the slider's midpoint keeps current behaviour.
         const density3d  = parseFloat(document.getElementById('mesh-density-3d').value) || 50;
@@ -652,20 +766,25 @@ class CFDApp {
         let body;
         if (this._glbUrl) {
             body = { stlPath: this._glbUrl.replace('/uploads/', ''), stlScale: this._glbScale,
-                     windSpeed, windAngle, buildingHeight: height, z0, domainFactor: domainMul, nIterations };
+                     windSpeed, windAngle, buildingHeight: height, z0, domainFactor: domainMul, nIterations,
+                     transient: transient3d, endTime: endTime3d, dt: dt3d };
         } else {
             const tc = this._tc3d || CASES_3D[0];
             if (!tc) { this._setStatus('Kein 3D Modell geladen', 'error'); this._solving = false; return; }
             body = { footprint: tc.polygon, height: tc.height || height,
-                     windSpeed, windAngle, z0, domainFactor: domainMul, nIterations };
+                     windSpeed, windAngle, z0, domainFactor: domainMul, nIterations,
+                     transient: transient3d, endTime: endTime3d, dt: dt3d };
+            if (tc.flowType) body.flowType = tc.flowType;
             if (tc.buildings?.length > 0) {
                 body.buildings = tc.buildings;
                 body.height = Math.max(...tc.buildings.map(b => b.height));
             }
         }
         // Near-wall mesh size relative to the (effective) building height.
+        // If the test case specifies an explicit meshSize, honour it (e.g. small-scale validation cases).
         const hEff = body.height ?? body.buildingHeight ?? height;
-        body.meshSize = Math.max(hEff / meshFactor, 0.3);
+        const tcMeshSize = (!this._glbUrl && this._tc3d?.meshSize) ? this._tc3d.meshSize : null;
+        body.meshSize = tcMeshSize ?? Math.max(hEff / meshFactor, 0.3);
 
         const endpoint = this._glbUrl ? '/api/cfd/solve3d-stl' : '/api/cfd/solve3d';
 
@@ -708,8 +827,8 @@ class CFDApp {
                 if (line.startsWith('{"success":') || line.startsWith('{"log":')) {
                     try {
                         const result = JSON.parse(line);
+                        this._solveResult = result;   // always capture, even success=false
                         if (result.success) {
-                            this._solveResult = result;
                             if (result.field) {
                                 this._appendLog(`✓ cD=${result.force_coefficients?.Cd?.toFixed(4)} cL=${result.force_coefficients?.Cl?.toFixed(4)}`);
                             } else if (result.case_dir) {
@@ -752,13 +871,14 @@ class CFDApp {
             this._appendLog('⚠ Ergebnis-Daten nicht empfangen. Bitte erneut versuchen.');
             return;
         }
-        // Solver ran but produced no usable result (diverged / no time steps written).
-        // Surface it here instead of silently 404ing on every slice/streamline fetch.
+        // Solver failed but may have partial results (e.g. timeout mid-run).
+        // Show a warning but continue to display whatever was written.
         if (this._solveResult.success === false || this._solveResult.error) {
             const msg = this._solveResult.error || 'Berechnung fehlgeschlagen.';
             this._appendLog('⚠ ' + msg);
-            this._setStatus(msg, 'error');
-            return;
+            this._setStatus(msg, 'warning');
+            if (!this._solveResult.field && !this._solveResult.case_dir) return;
+            this._appendLog('ℹ Teilergebnisse werden angezeigt.');
         }
         // 2D result: has field data inline
         if (this._solveResult.field) {
@@ -814,6 +934,16 @@ class CFDApp {
         return parseInt(document.getElementById('sl2d-nseeds')?.value) || 28;
     }
 
+    _fitViewToMesh() {
+        if (!this._polygon?.length) return;
+        const xs  = this._polygon.map(p => p[0]);
+        const ys  = this._polygon.map(p => p[1]);
+        const cx  = (Math.max(...xs) + Math.min(...xs)) / 2;
+        const cy  = (Math.max(...ys) + Math.min(...ys)) / 2;
+        const dim = Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys));
+        this._viewer.fitOrthoView(cx, cy, dim * 2.5);
+    }
+
     _refreshStreamlines2D() {
         if (!this._solveResult) return;
         const maxSpd = this._viewer.show2DStreamlines(this._solveResult, this._polygon, this._nSeeds2D());
@@ -826,11 +956,11 @@ class CFDApp {
         const noBg     = slActive && document.getElementById('sl2d-no-bg')?.checked;
 
         if (fieldName === 'mesh') {
-            const fakeResult = this._solveResult ?? (this._meshData ? { field: this._meshData } : null);
+            const fakeResult = (this._meshData ? { field: this._meshData } : null) ?? this._solveResult;
             if (fakeResult) {
                 this._viewer.showMeshOnly(fakeResult);
                 this._viewer.showPolygon(this._polygon);
-                this._viewer.syncViewWithSVG(vs);
+                this._fitViewToMesh();
             }
             this._updateColorbar(fieldName, null, null);
             return;
@@ -1249,13 +1379,19 @@ class CFDApp {
             document.getElementById('sl3d-seeds').addEventListener('change', () => {
                 if (document.getElementById('show-streamlines-3d').checked) this._update3DStreamlines();
             });
+            document.getElementById('show-surface-lines-3d').addEventListener('change', e => {
+                if (e.target.checked) this._fetchSurfaceStreamlines();
+                else this._viewer.clearSurfaceStreamlines();
+            });
             // Slider events now also trigger colored result fetch (override plain plane update)
             // (already bound in _init3DSlicePlanes via _update3DSlicePlanes → _update3DSlices)
         }
 
         this._enableResultBtn();
         this._setView('result');
-        this._update3DSlices(); // fetch colored slices at current positions
+        this._update3DSlices();
+        this._setup3DAnimation(result);
+        if (result.force_history) this._renderForcePlot(result.force_history);
         this._setStatus('3D Ergebnisse geladen', 'ok');
     }
 
@@ -1313,12 +1449,14 @@ class CFDApp {
             this._viewer.setSlicePlaneVisible('vt', vtOn);
         }
 
-        // Cache slice data and redraw streamlines if toggle is active
+        // Cache slice data and redraw streamlines if toggle is active.
+        // Streamlines are independent of plane visibility — drawn on the plane position even if the
+        // colored plane itself is hidden.
         this._lastSlice = { hz: { data: hzData, val: hzVal }, vt: { data: vtData, val: vtVal } };
         if (document.getElementById('show-streamlines-3d')?.checked) {
             const nSeeds = parseInt(document.getElementById('sl3d-seeds')?.value) || 24;
-            if (hzData && hzOn) this._viewer.showSliceStreamlines(hzData, 'z', hzVal, 'hz', nSeeds);
-            if (vtData && vtOn) this._viewer.showSliceStreamlines(vtData, 'y', vtVal, 'vt', nSeeds);
+            if (hzData) this._viewer.showSliceStreamlines(hzData, 'z', hzVal, 'hz', nSeeds);
+            if (vtData) this._viewer.showSliceStreamlines(vtData, 'y', vtVal, 'vt', nSeeds);
         }
     }
 
@@ -1340,12 +1478,14 @@ class CFDApp {
         } catch { return null; }
     }
 
-    async _fetchSlice(plane, value, field) {
+    async _fetchSlice(plane, value, field, timeStep = null) {
         try {
+            const body = { caseDir: this._3dCaseDir, plane, value, field };
+            if (timeStep !== null) body.timeStep = timeStep;
             const res = await fetch(api('/api/cfd/slice3d'), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ caseDir: this._3dCaseDir, plane, value, field })
+                body: JSON.stringify(body)
             });
             if (!res.ok) return null;
             return await res.json();
@@ -1356,14 +1496,13 @@ class CFDApp {
         if (!this._3dCaseDir) return;
         const nSeeds = parseInt(document.getElementById('sl3d-seeds').value) || 24;
 
-        // Prefer client-side RK4 on slice planes if slice data is available
+        // Prefer client-side RK4 on slice planes if slice data is available.
+        // Streamlines are independent of plane visibility.
         if (this._lastSlice) {
             const { hz, vt } = this._lastSlice;
             this._viewer._clearAllSliceStreamlines?.();
-            const hzOn = document.getElementById('show-hz-plane')?.checked !== false;
-            const vtOn = document.getElementById('show-vt-plane')?.checked !== false;
-            if (hz?.data && hzOn) this._viewer.showSliceStreamlines(hz.data, 'z', hz.val, 'hz', nSeeds);
-            if (vt?.data && vtOn) this._viewer.showSliceStreamlines(vt.data, 'y', vt.val, 'vt', nSeeds);
+            if (hz?.data) this._viewer.showSliceStreamlines(hz.data, 'z', hz.val, 'hz', nSeeds);
+            if (vt?.data) this._viewer.showSliceStreamlines(vt.data, 'y', vt.val, 'vt', nSeeds);
             return;
         }
 
@@ -1383,6 +1522,48 @@ class CFDApp {
             this._setStatus(`${data.count ?? 0} Stromlinien geladen`, 'ok');
         } catch (e) {
             this._setStatus('Stromlinien-Fehler: ' + e.message, 'error');
+        }
+    }
+
+    async _fetchSurfaceStreamlines() {
+        if (!this._3dCaseDir) return;
+        this._setStatus('Oberflächenstromlinien werden berechnet…');
+        try {
+            const res = await fetch(api('/api/cfd/surface-lines'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ caseDir: this._3dCaseDir }),
+            });
+            if (!res.ok) throw new Error(await res.text());
+            const data = await res.json();
+            // For GLB case: model was centered by trimesh (XY) and z_min set to 0.
+            // Three.js GLB loading centers by subtracting bbox center, so z-offset = H/2.
+            let ofCenter = null;
+            if (this._glbBounds && this._glbScale) {
+                const b = this._glbBounds;
+                const H = (b.max[2] - b.min[2]) * this._glbScale;
+                ofCenter = { x: 0, y: 0, z: H / 2 };
+            }
+            this._viewer.showSurfaceStreamlines(data.lines ?? [], ofCenter);
+            this._setStatus(`${data.count ?? 0} Oberflächenstromlinien geladen`, 'ok');
+        } catch (e) {
+            this._setStatus('Oberflächenstromlinien-Fehler: ' + e.message, 'error');
+        }
+    }
+
+    _updateEndTimeHint(autoSet = false) {
+        const hint = document.getElementById('end-time-3d-hint');
+        if (!hint) return;
+        const h = parseFloat(document.getElementById('building-height')?.value) || 40;
+        const v = parseFloat(document.getElementById('wind-speed-3d')?.value) || 20;
+        const f = parseFloat(document.getElementById('domain-size-3d')?.value) || 3;
+        // Upstream distance ≈ f * H; convective time = upstreamDist / windSpeed
+        const tConv = (f * h) / v;
+        const tRec = Math.ceil(tConv * 2);
+        hint.textContent = `Empfehlung: ≥ ${tRec} s (${Math.round(tConv)} s Konvektionszeit × 2)`;
+        if (autoSet) {
+            const input = document.getElementById('end-time-3d');
+            if (input && parseFloat(input.value) < tRec) input.value = tRec;
         }
     }
 
@@ -1595,6 +1776,252 @@ class CFDApp {
         const t = this._animTimeSteps[this._animIdx];
         document.getElementById('anim-time').textContent =
             `t = ${t % 1 === 0 ? t.toFixed(0) : t.toFixed(3)} s`;
+    }
+
+    // ── 3D transient animation ─────────────────────────────────────
+
+    _setup3DAnimation(result) {
+        const ts = result.time_steps;
+        const bar = document.getElementById('anim-bar-3d');
+        if (!ts || ts.length <= 1) { bar.classList.add('hidden'); return; }
+
+        this._anim3dTimeSteps = ts;
+        this._anim3dIdx       = ts.length - 1;
+        this._anim3dCache     = new Array(ts.length).fill(null);
+        this._anim3dPlaying   = false;
+
+        bar.classList.remove('hidden');
+        const slider = document.getElementById('anim3d-slider');
+        slider.max   = ts.length - 1;
+        slider.value = this._anim3dIdx;
+        this._update3dAnimLabel();
+
+        if (!this._anim3dBound) {
+            this._anim3dBound = true;
+            document.getElementById('anim3d-play') .addEventListener('click', () => this._anim3dToggle());
+            document.getElementById('anim3d-first').addEventListener('click', () => { this._anim3dStop(); this._anim3dGoto(0); });
+            document.getElementById('anim3d-last') .addEventListener('click', () => { this._anim3dStop(); this._anim3dGoto(ts.length - 1); });
+            document.getElementById('anim3d-prev') .addEventListener('click', () => { this._anim3dStop(); this._anim3dGoto(this._anim3dIdx - 1); });
+            document.getElementById('anim3d-next') .addEventListener('click', () => { this._anim3dStop(); this._anim3dGoto(this._anim3dIdx + 1); });
+            slider.addEventListener('input', () => { this._anim3dStop(); this._anim3dGoto(+slider.value); });
+        }
+        this._prefetch3DAnimFrames();
+    }
+
+    async _prefetch3DAnimFrames() {
+        if (!this._anim3dTimeSteps?.length) return;
+        const n   = this._anim3dTimeSteps.length;
+        const gen = (this._anim3dPrefetchGen = (this._anim3dPrefetchGen ?? 0) + 1);
+
+        const [xMin, yMin, zMin] = this._3dBbox.min;
+        const [xMax, yMax, zMax] = this._3dBbox.max;
+        const hzFrac = parseFloat(document.getElementById('sl3d-hz').value);
+        const vtFrac = parseFloat(document.getElementById('sl3d-vt').value);
+        const hzVal  = zMin + hzFrac * (zMax - zMin);
+        const vtVal  = yMin + vtFrac * (yMax - yMin);
+        const field  = document.getElementById('result-field-3d').value;
+
+        const BATCH = 2;
+        let loaded = 0;
+        for (let i = 0; i < n; i += BATCH) {
+            if (this._anim3dPrefetchGen !== gen) return;
+            const batch = [];
+            for (let j = i; j < Math.min(i + BATCH, n); j++) {
+                const t = this._anim3dTimeSteps[j];
+                batch.push(Promise.all([
+                    this._fetchSlice('z', hzVal, field, t),
+                    this._fetchSlice('y', vtVal, field, t),
+                ]).then(([hz, vt]) => {
+                    if (this._anim3dPrefetchGen !== gen) return;
+                    this._anim3dCache[j] = { hz, vt };
+                    loaded++;
+                    document.getElementById('anim3d-time').textContent =
+                        `Laden ${Math.round(loaded / n * 100)}%`;
+                }));
+            }
+            await Promise.all(batch);
+        }
+        if (this._anim3dPrefetchGen !== gen) return;
+        this._update3dAnimLabel();
+    }
+
+    _anim3dGoto(idx) {
+        const n = this._anim3dTimeSteps.length;
+        idx = Math.max(0, Math.min(n - 1, idx));
+        this._anim3dIdx = idx;
+        document.getElementById('anim3d-slider').value = idx;
+        this._update3dAnimLabel();
+
+        const cached = this._anim3dCache[idx];
+        if (cached) {
+            this._apply3DFrame(cached);
+        } else {
+            // Cache miss — fetch on demand
+            const t = this._anim3dTimeSteps[idx];
+            const [xMin, yMin, zMin] = this._3dBbox.min;
+            const [xMax, yMax, zMax] = this._3dBbox.max;
+            const hzVal = zMin + parseFloat(document.getElementById('sl3d-hz').value) * (zMax - zMin);
+            const vtVal = yMin + parseFloat(document.getElementById('sl3d-vt').value) * (yMax - yMin);
+            const field = document.getElementById('result-field-3d').value;
+            Promise.all([
+                this._fetchSlice('z', hzVal, field, t),
+                this._fetchSlice('y', vtVal, field, t),
+            ]).then(([hz, vt]) => {
+                this._anim3dCache[idx] = { hz, vt };
+                if (this._anim3dIdx === idx) this._apply3DFrame({ hz, vt });
+            });
+        }
+
+        // Draw time indicator on force plot
+        this._updateForcePlotIndicator(this._anim3dTimeSteps[idx]);
+    }
+
+    _apply3DFrame({ hz, vt }) {
+        this._viewer.clearSliceResults?.();
+        const field   = document.getElementById('result-field-3d').value;
+        const showVec = document.getElementById('show-vectors-3d').checked;
+        const hzOn    = document.getElementById('show-hz-plane').checked;
+        const vtOn    = document.getElementById('show-vt-plane').checked;
+        if (hz) {
+            const b = this._viewer.show3DSlice(hz, field, 'z', hz._val ?? 0, 'hz');
+            if (showVec && hz.vectors) this._viewer.show3DSliceVectors(hz.vectors, 'z', hz._val ?? 0, 'hz');
+            if (b) this._updateColorbar(field, b.vmin, b.vmax);
+            this._viewer.setSlicePlaneVisible('hz', hzOn);
+        }
+        if (vt) {
+            this._viewer.show3DSlice(vt, field, 'y', vt._val ?? 0, 'vt');
+            if (showVec && vt.vectors) this._viewer.show3DSliceVectors(vt.vectors, 'y', vt._val ?? 0, 'vt');
+            this._viewer.setSlicePlaneVisible('vt', vtOn);
+        }
+    }
+
+    _anim3dToggle() { this._anim3dPlaying ? this._anim3dStop() : this._anim3dStart(); }
+
+    _anim3dStart() {
+        this._anim3dPlaying = true;
+        document.getElementById('anim3d-play').textContent = '⏸';
+        document.getElementById('anim3d-play').classList.add('active');
+        this._anim3dStep();
+    }
+
+    _anim3dStop() {
+        this._anim3dPlaying = false;
+        clearTimeout(this._anim3dTimer);
+        document.getElementById('anim3d-play').textContent = '▶';
+        document.getElementById('anim3d-play').classList.remove('active');
+    }
+
+    _anim3dStep() {
+        if (!this._anim3dPlaying) return;
+        const next = (this._anim3dIdx + 1) % this._anim3dTimeSteps.length;
+        this._anim3dGoto(next);
+        this._anim3dTimer = setTimeout(() => this._anim3dStep(), 1000 / this._anim3dFps);
+    }
+
+    _update3dAnimLabel() {
+        const t = this._anim3dTimeSteps[this._anim3dIdx];
+        if (t === undefined) return;
+        document.getElementById('anim3d-time').textContent =
+            `t = ${t % 1 === 0 ? t.toFixed(0) : t.toFixed(2)} s`;
+    }
+
+    // ── Cd/Cl force plot ──────────────────────────────────────────
+
+    _renderForcePlot(fh) {
+        const section = document.getElementById('force-plot-section-3d');
+        const canvas  = document.getElementById('force-plot-3d');
+        if (!fh?.time?.length) return;
+        section.style.display = 'block';
+        canvas.style.display  = 'block';
+
+        const dpr = window.devicePixelRatio || 1;
+        const W   = canvas.parentElement.clientWidth || 200;
+        const H   = 80;
+        canvas.width  = W * dpr;
+        canvas.height = H * dpr;
+        canvas.style.width  = W + 'px';
+        canvas.style.height = H + 'px';
+
+        const ctx = canvas.getContext('2d');
+        ctx.scale(dpr, dpr);
+        this._fh = fh;   // keep for indicator redraws
+        this._drawForcePlot(ctx, fh, W, H, null);
+    }
+
+    _drawForcePlot(ctx, fh, W, H, tIndicator) {
+        ctx.clearRect(0, 0, W, H);
+
+        const PAD = { t: 6, b: 14, l: 28, r: 6 };
+        const pw  = W - PAD.l - PAD.r;
+        const ph  = H - PAD.t - PAD.b;
+
+        const tMin = fh.time[0], tMax = fh.time[fh.time.length - 1];
+        const allVals = [...fh.Cd, ...fh.Cl];
+        const vMin = Math.min(...allVals), vMax = Math.max(...allVals);
+        const vRange = vMax - vMin || 1;
+
+        const tx = t => PAD.l + (t - tMin) / (tMax - tMin || 1) * pw;
+        const ty = v => PAD.t + ph - (v - vMin) / vRange * ph;
+
+        // Grid line at 0
+        if (vMin < 0 && vMax > 0) {
+            ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(PAD.l, ty(0)); ctx.lineTo(PAD.l + pw, ty(0));
+            ctx.stroke();
+        }
+
+        const drawLine = (data, color) => {
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            fh.time.forEach((t, i) => {
+                i === 0 ? ctx.moveTo(tx(t), ty(data[i])) : ctx.lineTo(tx(t), ty(data[i]));
+            });
+            ctx.stroke();
+        };
+        drawLine(fh.Cd, '#3d9eff');
+        drawLine(fh.Cl, '#00e5b0');
+
+        // Axes labels
+        ctx.fillStyle = 'rgba(180,190,210,0.7)';
+        ctx.font = '9px monospace';
+        ctx.textAlign = 'right';
+        ctx.fillText(vMax.toFixed(1), PAD.l - 2, PAD.t + 6);
+        ctx.fillText(vMin.toFixed(1), PAD.l - 2, PAD.t + ph);
+        ctx.textAlign = 'left';
+        ctx.fillText(`${tMin.toFixed(1)}s`, PAD.l, H - 2);
+        ctx.textAlign = 'right';
+        ctx.fillText(`${tMax.toFixed(1)}s`, PAD.l + pw, H - 2);
+
+        // Legend
+        ctx.fillStyle = '#3d9eff'; ctx.fillRect(PAD.l, PAD.t - 2, 10, 4);
+        ctx.fillStyle = 'rgba(180,190,210,0.7)'; ctx.fillText('Cd', PAD.l + 13, PAD.t + 3);
+        ctx.fillStyle = '#00e5b0'; ctx.fillRect(PAD.l + 28, PAD.t - 2, 10, 4);
+        ctx.fillStyle = 'rgba(180,190,210,0.7)'; ctx.fillText('Cl', PAD.l + 41, PAD.t + 3);
+
+        // Time indicator
+        if (tIndicator !== null && tIndicator !== undefined) {
+            ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([3, 3]);
+            ctx.beginPath();
+            const x = tx(tIndicator);
+            ctx.moveTo(x, PAD.t); ctx.lineTo(x, PAD.t + ph);
+            ctx.stroke();
+            ctx.setLineDash([]);
+        }
+    }
+
+    _updateForcePlotIndicator(t) {
+        if (!this._fh) return;
+        const canvas = document.getElementById('force-plot-3d');
+        const ctx    = canvas.getContext('2d');
+        const dpr    = window.devicePixelRatio || 1;
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        const W = parseInt(canvas.style.width), H = parseInt(canvas.style.height);
+        this._drawForcePlot(ctx, this._fh, W, H, t);
     }
 }
 
