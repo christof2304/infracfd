@@ -72,8 +72,12 @@ class CFDApp {
 
         document.querySelectorAll('.vbtn').forEach(b =>
             b.classList.toggle('active', b.dataset.view === mode));
-        // ResizeObserver in viewer3d.js handles _resize() automatically
-        // when the GL canvas becomes visible — no explicit call needed here.
+        // The GL canvas just toggled display, but the ResizeObserver only
+        // watches #canvas-area, whose size doesn't change on a child display
+        // toggle — so it never fires here. Resize explicitly once layout has
+        // applied, otherwise the renderer keeps a stale (often 0×0) size and
+        // the mesh/result only appears after an unrelated resize (e.g. F12).
+        requestAnimationFrame(() => this._viewer._resize());
     }
 
     _enableResultBtn() {
@@ -663,6 +667,18 @@ class CFDApp {
         this._solveResult = null;
         this._meshData = null;
         this._viewer.clear();
+        // Stop and discard any animation from the previous run. Otherwise its
+        // playback timer, cached colour frames and case dir bleed onto the new
+        // result — old frames get painted onto the new mesh (same case → same
+        // buffer size, so applyAnimColors doesn't reject them) and the slider's
+        // slow path refetches from the previous case dir. _setupAnimation
+        // rebuilds this state for the new result.
+        this._animStop?.();
+        this._animTimeSteps   = [];
+        this._animCaseDir     = null;
+        this._animColorCache  = null;
+        this._animPrefetchGen = (this._animPrefetchGen ?? 0) + 1;
+        document.getElementById('anim-bar').classList.add('hidden');
 
         // Switch to draw mode so SVG is visible (and has correct dimensions)
         // while the calculation runs. syncViewWithSVG() needs the SVG rect.
@@ -746,6 +762,19 @@ class CFDApp {
         this._solving = true;
         this._logLines = [];
         this._solveResult = null;
+        // Remove artifacts from a previous calculation so they don't linger on
+        // top of the new result. Unlike _run2D this is reached without a case
+        // reload when re-running the same system (e.g. after changing a
+        // parameter), so nothing else clears the old slices/streamlines.
+        // Keep _modelGroup — the building preview stays valid for the result.
+        this._viewer.clear3DResult?.();
+        // Stop/discard the previous run's animation (timer + cached frames) so it
+        // doesn't bleed onto the new result. _setup3DAnimation rebuilds it.
+        this._anim3dStop?.();
+        this._anim3dTimeSteps   = [];
+        this._anim3dCache       = [];
+        this._anim3dPrefetchGen = (this._anim3dPrefetchGen ?? 0) + 1;
+        document.getElementById('anim-bar-3d').classList.add('hidden');
         this._setStatus('3D Berechnung startet…');
         this._showLog();
 
@@ -1572,6 +1601,10 @@ class CFDApp {
     _setupAnimation(result) {
         const ts = result.field?.time_steps;
         if (!ts || ts.length <= 1) {
+            // Steady / single-frame result — make sure a previously running
+            // animation is stopped so it can't keep painting old frames.
+            this._animStop?.();
+            this._animTimeSteps = [];
             document.getElementById('anim-bar').classList.add('hidden');
             return;
         }
@@ -1783,7 +1816,12 @@ class CFDApp {
     _setup3DAnimation(result) {
         const ts = result.time_steps;
         const bar = document.getElementById('anim-bar-3d');
-        if (!ts || ts.length <= 1) { bar.classList.add('hidden'); return; }
+        if (!ts || ts.length <= 1) {
+            this._anim3dStop?.();
+            this._anim3dTimeSteps = [];
+            bar.classList.add('hidden');
+            return;
+        }
 
         this._anim3dTimeSteps = ts;
         this._anim3dIdx       = ts.length - 1;

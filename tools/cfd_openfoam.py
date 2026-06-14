@@ -235,16 +235,32 @@ RAS
 
     if transient:
         solver_app = "pimpleFoam"
-        delta_t = dt
         end_t = end_time
-        write_int = max(1, int(round(0.1 / dt)))  # write every ~0.1 s regardless of dt
+        # Adaptive timestep: the user-supplied dt is only the upper bound (maxDeltaT).
+        # Two failure modes are handled:
+        #  1) A fixed dt diverges because the thin near-wall layers reach high
+        #     convective Courant numbers (an airfoil at U=50 m/s hits Co≈18 at
+        #     dt=1e-3) — so pimpleFoam shrinks dt to honour maxCo.
+        #  2) The impulsive start (free stream applied instantly) overshoots on the
+        #     skewed trailing-edge cells; if the very first step already runs at a
+        #     large dt the local velocity blows up irrecoverably. So we SEED with a
+        #     tiny deltaT (gentle start, first-step Co≈0.2) and let adjustTimeStep
+        #     ramp it up toward maxDeltaT as the field develops.
+        # Frames are written on a fixed sim-time interval so animation spacing stays
+        # uniform regardless of the varying dt.
+        delta_t = min(dt, 1.0e-5)
+        write_ctrl = "adjustableRunTime"
+        write_int  = round(max(min(0.1, end_time / 30.0), dt), 6)  # ~30 frames
         purge = 0  # keep all time steps for animation
+        adjust_block = f"adjustTimeStep  yes;\nmaxCo           5;\nmaxDeltaT       {dt};"
     else:
         solver_app = "simpleFoam"
         delta_t = 1
         end_t = 500
+        write_ctrl = "timeStep"
         write_int = 500
         purge = 1
+        adjust_block = "adjustTimeStep  no;"
 
     _write_of_file(case_dir / "system" / "controlDict", None, None, f"""
 FoamFile
@@ -260,7 +276,7 @@ startTime       0;
 stopAt          endTime;
 endTime         {end_t};
 deltaT          {delta_t};
-writeControl    timeStep;
+writeControl    {write_ctrl};
 writeInterval   {write_int};
 purgeWrite      {purge};
 writeFormat     ascii;
@@ -269,6 +285,7 @@ writeCompression off;
 timeFormat      general;
 timePrecision   6;
 runTimeModifiable true;
+{adjust_block}
 
 functions
 {{
@@ -750,35 +767,93 @@ method          scotch;
                       bl_layers=bl_layers, bl_ratio=bl_ratio,
                       structured=structured, wind_speed=wind_speed)
 
+    # Detect the solver the controlDict launches (pimpleFoam=transient, simpleFoam=steady).
+    # Used by the structured solver override, the parallel reconstruct step, and the
+    # timeout estimate below.
+    is_transient = "pimpleFoam" in (case_dir / "system" / "controlDict").read_text()
+
     # For structured O-grid meshes, overwrite solver settings with more robust options.
     # The O-grid topology creates high skewness (>11) and non-orthogonality (>70°) near
     # the sharp TE, which causes GAMG to diverge. PCG+DIC has no coarse grid hierarchy
     # and handles skewed meshes better. Limited correction prevents over-correction in
     # highly skewed cells.
+    #
+    # The override must stay consistent with the solver the controlDict launches:
+    # create_openfoam_case() selects pimpleFoam (transient) or simpleFoam (steady).
+    # A steady-only fvSolution (SIMPLE block, no *Final solvers / no PIMPLE dict) makes
+    # pimpleFoam abort with "Entry 'UFinal' not found", so branch on the actual solver.
     if structured:
-        _write_of_file(case_dir / "system" / "fvSchemes", None, None, """
+        ddt_scheme = "Euler" if is_transient else "steadyState"
+        _write_of_file(case_dir / "system" / "fvSchemes", None, None, f"""
 FoamFile
-{
+{{
     version     2.0;
     format      ascii;
     class       dictionary;
     object      fvSchemes;
-}
-ddtSchemes      { default steadyState; }
-gradSchemes     { default cellLimited Gauss linear 1; }
+}}
+ddtSchemes      {{ default {ddt_scheme}; }}
+gradSchemes     {{ default cellLimited Gauss linear 1; }}
 divSchemes
-{
+{{
     default             none;
     div(phi,U)          bounded Gauss linearUpwind grad(U);
     div(phi,k)          bounded Gauss upwind;
     div(phi,epsilon)    bounded Gauss upwind;
     div((nuEff*dev2(T(grad(U))))) Gauss linear;
-}
-laplacianSchemes { default Gauss linear limited 0.5; }
-interpolationSchemes { default skewCorrected linear; }
-snGradSchemes { default limited 0.5; }
+}}
+laplacianSchemes {{ default Gauss linear limited 0.5; }}
+interpolationSchemes {{ default skewCorrected linear; }}
+snGradSchemes {{ default limited 0.5; }}
 """)
-        _write_of_file(case_dir / "system" / "fvSolution", None, None, """
+        if is_transient:
+            # Transient "robust PIMPLE" on the skewed O-grid: keep the robust
+            # PCG/PBiCGStab solvers and provide the *Final variants + PIMPLE dict
+            # pimpleFoam needs (regex keys "p.*" / "(U|k|epsilon).*" cover base and
+            # Final solves). The highly skewed trailing-edge cells trigger a local
+            # velocity spike that, without damping, makes the local Courant number
+            # explode (→2800) and adjustTimeStep collapse dt toward zero. The cure
+            # is the transient analogue of what makes the steady run stable:
+            # several outer correctors with under-relaxation. Because the outer
+            # loop is iterated to convergence (outerCorrectorResidualControl), the
+            # under-relaxation does NOT cost time accuracy — only the within-step
+            # path to the converged state is damped.
+            _write_of_file(case_dir / "system" / "fvSolution", None, None, """
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      fvSolution;
+}
+solvers
+{
+    "p.*"            { solver PCG; preconditioner DIC; tolerance 1e-06; relTol 0.01; }
+    pFinal           { solver PCG; preconditioner DIC; tolerance 1e-06; relTol 0; }
+    "(U|k|epsilon).*" { solver PBiCGStab; preconditioner DILU; tolerance 1e-07; relTol 0.01; }
+    Phi              { solver PCG; preconditioner DIC; tolerance 1e-06; relTol 0.01; }
+}
+PIMPLE
+{
+    nNonOrthogonalCorrectors 2;
+    nCorrectors 2;
+    nOuterCorrectors 15;
+    pRefCell 0;
+    pRefValue 0;
+    outerCorrectorResidualControl
+    {
+        U { tolerance 1e-4; relTol 0; }
+        p { tolerance 1e-4; relTol 0; }
+    }
+}
+relaxationFactors
+{
+    fields    { p 0.3; }
+    equations { U 0.7; "(k|epsilon)" 0.7; }
+}
+""")
+        else:
+            _write_of_file(case_dir / "system" / "fvSolution", None, None, """
 FoamFile
 {
     version     2.0;
@@ -811,14 +886,17 @@ relaxationFactors
 
     of_case = _of_path(case_dir)
 
-    print(f"  [2/4] Converting mesh + running simpleFoam ({n_procs} procs)...")
+    print(f"  [2/4] Converting mesh + running {'pimpleFoam' if is_transient else 'simpleFoam'} ({n_procs} procs)...")
     if n_procs > 1:
+        # Transient animation needs every written time step, so reconstruct them all;
+        # steady only needs the converged final state.
+        reconstruct = "reconstructPar" if is_transient else "reconstructPar -latestTime"
         run_block = (
             f'echo "=== decomposePar ({n_procs} domains) ==="\n'
             f'decomposePar -force 2>&1 | tail -3\n'
             f'mpirun --allow-run-as-root --oversubscribe -np {n_procs} $SOLVER -parallel 2>&1 || $SOLVER 2>&1\n'
             f'echo "=== reconstructPar ==="\n'
-            f'reconstructPar -latestTime 2>&1 | tail -3'
+            f'{reconstruct} 2>&1 | tail -3'
         )
     else:
         run_block = "$SOLVER 2>&1 || true"
@@ -866,15 +944,22 @@ echo "=== DONE ==="
     with open(script_path, "w", newline="\n") as f:
         f.write(of_script)
 
-    # Auto-scale timeout: for transient runs estimate ~0.4s per time step + 60s overhead.
+    # Auto-scale the timeout. The transient timestep is adaptive (Courant-limited)
+    # and seeded tiny, so it can't be derived from controlDict's deltaT — estimate
+    # instead from the simulated duration. Measured cost on this skewed O-grid with
+    # the robust PIMPLE setup is ~1500 s per simulated second on 4 cores; the formula
+    # below keeps ~1.5x headroom over that, capped at 1h, so healthy runs never get
+    # killed mid-solve (the old deltaT-based estimate misparsed the 1e-5 seed and
+    # always clamped to 300s, killing transient runs partway through).
     if timeout is None:
         try:
             ctrl = (case_dir / "system" / "controlDict").read_text()
             import re as _re
-            end_t = float(_re.search(r'endTime\s+([\d.]+)', ctrl).group(1))
-            dt_v  = float(_re.search(r'deltaT\s+([\d.]+)', ctrl).group(1))
-            is_tr = 'pimpleFoam' in ctrl
-            timeout = int(max(300, (end_t / dt_v) * 0.4 + 60)) if is_tr else 300
+            end_t = float(_re.search(r'endTime\s+([\d.eE+-]+)', ctrl).group(1))
+            if is_transient:
+                timeout = int(min(3600, max(300, end_t * 6500 / max(1, n_procs) * 1.4 + 90)))
+            else:
+                timeout = 300
         except Exception:
             timeout = 300
 

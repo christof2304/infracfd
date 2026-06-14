@@ -397,4 +397,53 @@ export const CFD_TEST_CASES = [
         structured: true,
         expected: { cD: "~0.006–0.008", cL: "~0 (α=0°)", cM: "~0" },
     },
+
+    // ── Strömungsabriss-Studie: gewölbtes Flugzeug-Tragflügelprofil ──
+    {
+        name: "NACA4412 Tragflügel (2D)",
+        desc: "Gewölbtes Flugzeug-Flügelprofil c=1m, Re≈3,3×10⁶. Anströmwinkel = Anstellwinkel α — für Stall-Studie 0…18° durchfahren; instationär aktivieren (Endzeit ~0.2s, Δt 0.001s; Zeitschritt wird Courant-begrenzt automatisch verkleinert). Abriss ~15°. (Abbott & von Doenhoff)",
+        polygon: (() => {
+            // NACA 4-stellig 4412: max. Wölbung m=4%, Wölbungsrücklage p=0.4, Dicke t=12%
+            const m = 0.04, p = 0.4, t = 0.12;
+            const N = 60;
+            // Dickenverteilung (symmetrisch um die Wölbungslinie)
+            const yt = x => (t / 0.2) * (
+                0.2969 * Math.sqrt(x)
+                - 0.126  * x
+                - 0.3516 * x * x
+                + 0.2843 * x * x * x
+                - 0.1015 * x * x * x * x
+            );
+            // Wölbungslinie yc und ihre Steigung dyc/dx
+            const yc  = x => x < p
+                ? (m / (p * p)) * (2 * p * x - x * x)
+                : (m / ((1 - p) * (1 - p))) * ((1 - 2 * p) + 2 * p * x - x * x);
+            const dyc = x => x < p
+                ? (2 * m / (p * p)) * (p - x)
+                : (2 * m / ((1 - p) * (1 - p))) * (p - x);
+            const r = v => Math.round(v * 1e4) / 1e4;
+            // Oberseite (xu,yu) bzw. Unterseite (xl,yl) senkrecht zur Wölbungslinie versetzt
+            const upper = x => { const th = Math.atan(dyc(x)), d = yt(x);
+                return [r(x - d * Math.sin(th)), r(yc(x) + d * Math.cos(th))]; };
+            const lower = x => { const th = Math.atan(dyc(x)), d = yt(x);
+                return [r(x + d * Math.sin(th)), r(yc(x) - d * Math.cos(th))]; };
+            const pts = [];
+            // Oberseite: LE (i=0) → TE (i=N), Cosinus-Verteilung
+            for (let i = 0; i <= N; i++) {
+                const x = (1 - Math.cos(Math.PI * i / N)) / 2;
+                pts.push(upper(x));
+            }
+            // Unterseite: TE (i=N) → fast-LE (i=1), LE auslassen (kein Duplikat)
+            for (let i = N; i >= 1; i--) {
+                const x = (1 - Math.cos(Math.PI * i / N)) / 2;
+                pts.push(lower(x));
+            }
+            return pts;
+        })(),
+        windSpeed: 50,    // Re = U·c/ν = 50·1/1.5e-5 ≈ 3,3×10⁶
+        meshSize: 0.02,
+        farField: 25,     // größerer Außenraum: stallender Nachlauf bleibt im Gebiet
+        structured: true,
+        expected: { cD: "~0.007 (α=0°)", cL: "~0.45 (α=0°), cL,max≈1.5 bei α≈15°", cM: "~-0.1" },
+    },
 ];

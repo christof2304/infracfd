@@ -186,7 +186,7 @@ try:
         output_dir=r'{case_dir}', transient={transient}, end_time={end_time}, dt={dt})
     result = run_openfoam(case, polygon, mesh_size={mesh_size}, far_field_factor={far_field},
         bl_layers={bl_layers}, bl_ratio={bl_ratio},
-        structured={structured}, wind_speed={wind_speed})
+        structured={structured}, wind_speed={wind_speed}, n_procs={4 if transient else 1})
     result["stats"]    = mesh["stats"]
     result["case_dir"] = r'{case_dir}'
     field_data = parse_cfd_results(r'{case_dir}', section_polygon=polygon)

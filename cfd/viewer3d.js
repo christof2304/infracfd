@@ -395,28 +395,29 @@ export class Viewer3D {
         const vmin = p05, vmax = p95;
         const range = Math.max(vmax - vmin, 1e-9);
 
-        // ── Build geometry (flat per-triangle coloring) ──────────────
-        // Flat shading: each triangle gets a uniform color from its own value.
-        // Gouraud (vertex) interpolation caused black artifacts on boundary nodes
-        // that had no valid-triangle neighbors (nodeCnt=0 → t=0 → dark color).
+        // ── Build geometry (smooth per-node coloring) ────────────────
+        // OpenFOAM stores one value per cell (→ per triangle), which renders
+        // blocky. Interpolate those cell values to the mesh nodes (mean of the
+        // values of all valid triangles meeting at a node) and colour each
+        // vertex by its node value, so the GPU interpolates across the face
+        // (Gouraud). Accumulating over ONLY the rendered (valid) triangles
+        // guarantees every emitted vertex's node has count ≥ 1 — this avoids
+        // the black boundary-node artifacts a naive earlier attempt produced.
         const validIdxs = [];
         for (let i = 0; i < triIndices.length; i++) { if (validMask[i]) validIdxs.push(i); }
+        const tris = validIdxs.map(i => triIndices[i]);
 
-        const pos   = new Float32Array(validIdxs.length * 3 * 3);
-        const color = new Float32Array(validIdxs.length * 3 * 3);
-
-        let vi = 0;
-        for (const rawIdx of validIdxs) {
-            const tri = triIndices[rawIdx];
-            const t   = Math.max(0, Math.min(1, (triVals[rawIdx] - vmin) / range));
-            const [r, g, b] = jetColor(t);
+        const pos = new Float32Array(tris.length * 3 * 3);
+        let pi = 0;
+        for (const tri of tris) {
             for (const idx of tri) {
                 const [x, y] = nodeXY[idx];
-                pos[vi] = x; pos[vi+1] = y; pos[vi+2] = 0;
-                color[vi] = r; color[vi+1] = g; color[vi+2] = b;
-                vi += 3;
+                pos[pi] = x; pos[pi+1] = y; pos[pi+2] = 0;
+                pi += 3;
             }
         }
+        const color = this._smoothNodeColors(
+            tris, validIdxs.map(i => triVals[i]), nNodes, vmin, range);
 
         const geom = new THREE.BufferGeometry();
         geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
@@ -429,35 +430,56 @@ export class Viewer3D {
         this._cfdGroup.add(mesh);
 
         this._cfdAnimMesh = mesh;
-        this._cfdAnimMeta = { validIdxs, vmin: p05, vmax: p95, range };
+        this._cfdAnimMeta = { validIdxs, tris, nNodes, vmin: p05, vmax: p95, range };
 
         this._initOrthoMode();
         return { vmin: p05, vmax: p95 };
     }
 
-    // ── Animation color pre-computation ──────────────────────────
-
-    // Compute a color Float32Array from timestep data, reusing the cached mesh mapping.
-    // Returns null if no cached mesh exists yet.
-    computeAnimColors(timestepData, vmin, vmax) {
-        const meta = this._cfdAnimMeta;
-        if (!meta) return null;
-        const { validIdxs, range } = meta;
-        const field = timestepData.field ?? timestepData;
-        if (!field?.triangles) return null;
-        const color = new Float32Array(validIdxs.length * 3 * 3);
+    // Interpolate per-triangle (cell) values to nodes and return a non-indexed
+    // per-vertex color array for smooth (Gouraud) shading. `tris` are the
+    // rendered triangles (node-index triples); `valsPerTri[k]` is the cell value
+    // of tris[k]. Each node value is the mean of the values of the triangles
+    // meeting at it — computed over exactly the rendered set, so every node in
+    // `tris` is touched at least once (no zero-count / black-vertex artifacts).
+    _smoothNodeColors(tris, valsPerTri, nNodes, vmin, range) {
+        const sum = new Float64Array(nNodes);
+        const cnt = new Float64Array(nNodes);
+        for (let k = 0; k < tris.length; k++) {
+            const v = valsPerTri[k], tri = tris[k];
+            sum[tri[0]] += v; cnt[tri[0]]++;
+            sum[tri[1]] += v; cnt[tri[1]]++;
+            sum[tri[2]] += v; cnt[tri[2]]++;
+        }
+        const color = new Float32Array(tris.length * 3 * 3);
         let vi = 0;
-        for (const rawIdx of validIdxs) {
-            const tri = field.triangles[rawIdx];
-            const p = tri?.p ?? vmin;
-            const t = Math.max(0, Math.min(1, (p - vmin) / range));
-            const [r, g, b] = jetColor(t);
+        for (let k = 0; k < tris.length; k++) {
+            const tri = tris[k];
             for (let j = 0; j < 3; j++) {
+                const idx = tri[j];
+                const nv = cnt[idx] ? sum[idx] / cnt[idx] : valsPerTri[k];
+                const t = Math.max(0, Math.min(1, (nv - vmin) / range));
+                const [r, g, b] = jetColor(t);
                 color[vi] = r; color[vi+1] = g; color[vi+2] = b;
                 vi += 3;
             }
         }
         return color;
+    }
+
+    // ── Animation color pre-computation ──────────────────────────
+
+    // Compute a color Float32Array from timestep data, reusing the cached mesh mapping.
+    // Returns null if no cached mesh exists yet. Uses the same node-averaged
+    // smoothing as the static result so animation frames look identical.
+    computeAnimColors(timestepData, vmin, vmax) {
+        const meta = this._cfdAnimMeta;
+        if (!meta) return null;
+        const { validIdxs, tris, nNodes, range } = meta;
+        const field = timestepData.field ?? timestepData;
+        if (!field?.triangles) return null;
+        const valsPerTri = validIdxs.map(rawIdx => field.triangles[rawIdx]?.p ?? vmin);
+        return this._smoothNodeColors(tris, valsPerTri, nNodes, vmin, range);
     }
 
     // Instantly apply a pre-computed color array to the CFD mesh (no geometry rebuild).
@@ -956,6 +978,7 @@ export class Viewer3D {
     clear3DResult() {
         this.clearSlices();
         this._clearStreamlines();
+        this.clearSurfaceStreamlines();
     }
 
     // Fit the orthographic camera to a world-space region centred at (cx,cy).
