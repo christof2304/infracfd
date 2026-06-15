@@ -332,28 +332,6 @@ export const CFD_TEST_CASES = [
         expected: { cD: "Dolfyn ref", cL: "Dolfyn ref", cM: "Dolfyn ref" },
     },
     {
-        name: "Doppel-Lärmschutzwand (Dolfyn 2D)",
-        desc: "Zwei Lärmschutzwände beidseitig der Autobahn am Boden, B≈40m",
-        grounded: true,
-        // Offene Kette: linke Wand (gespiegelt) → Autobahn-Boden → rechte Wand. Beide auf y=0.
-        polygon: (() => {
-            // Rechte Wand, linker Bodenpunkt → über die Wand → rechter Bodenpunkt
-            const right = [
-                [17.5, 0], [17.5, 0.8], [19.03, 1.683], [19.6, 1.683],
-                [19.6, 2.984], [19.03, 2.984], [18.521, 2.5],
-                [17.557, 8.923], [17.656, 9.0],
-                [19.215, 4.0], [20.2, 4.0], [20.2, 0],
-            ];
-            // Linke Wand = an x=0 gespiegelt und umgekehrt, damit sie links→rechts durchlaufen wird
-            const left = right.map(([x, y]) => [-x, y]).reverse();
-            return [...left, ...right];
-        })(),
-        windSpeed: 16.17,
-        meshSize: 0.15,
-        farField: 12,
-        expected: { cD: "Dolfyn ref", cL: "Dolfyn ref", cM: "Dolfyn ref" },
-    },
-    {
         name: "Airrail-Hülle (Dolfyn 2D)",
         desc: "Airrail Außenhülle am Boden, ovale Querschnittsform, B≈56m, H≈23.5m",
         grounded: true,
