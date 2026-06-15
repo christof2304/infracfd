@@ -46,7 +46,7 @@ def _run_of_script(script_path, case_dir, timeout=600):
 def create_openfoam_case(mesh_result, wind_speed=20.0, wind_angle=0.0,
                          nu=1.5e-5, turbulence_intensity=0.05,
                          output_dir=None, transient=False, end_time=5.0, dt=0.001,
-                         write_interval=100):
+                         write_interval=100, grounded=None):
     """
     Create an OpenFOAM case directory from a CFD mesh result.
 
@@ -65,6 +65,12 @@ def create_openfoam_case(mesh_result, wind_speed=20.0, wind_angle=0.0,
         import tempfile
         output_dir = tempfile.mkdtemp(prefix="cfd_case_")
     case_dir = Path(output_dir)
+
+    # Grounded cases use a rectangular domain (inlet/outlet/top/ground patches)
+    # instead of the free-flow circular farfield. Inferred from the mesh unless
+    # the caller forces it.
+    if grounded is None:
+        grounded = bool(mesh_result.get("grounded"))
 
     # Wind velocity components
     rad = math.radians(wind_angle)
@@ -87,8 +93,78 @@ def create_openfoam_case(mesh_result, wind_speed=20.0, wind_angle=0.0,
 
     # ── 0/ — Initial and boundary conditions ──
 
-    # U (velocity)
-    _write_of_file(case_dir / "0" / "U", "volVectorField", "U", f"""
+    if grounded:
+        # Rectangular domain: inlet (fixed velocity), outlet (fixed pressure),
+        # top (slip / frictionless), ground + section (no-slip walls). No flow
+        # passes under the bodies — they stand on the ground.
+        _write_of_file(case_dir / "0" / "U", "volVectorField", "U", f"""
+dimensions      [0 1 -1 0 0 0 0];
+internalField   uniform ({Ux} {Uy} 0);
+boundaryField
+{{
+    inlet   {{ type fixedValue; value uniform ({Ux} {Uy} 0); }}
+    outlet  {{ type inletOutlet; inletValue uniform (0 0 0); value uniform ({Ux} {Uy} 0); }}
+    top     {{ type slip; }}
+    ground  {{ type noSlip; }}
+    section {{ type noSlip; }}
+    defaultFaces {{ type empty; }}
+}}
+""")
+        _write_of_file(case_dir / "0" / "p", "volScalarField", "p", f"""
+dimensions      [0 2 -2 0 0 0 0];
+internalField   uniform 0;
+boundaryField
+{{
+    inlet   {{ type zeroGradient; }}
+    outlet  {{ type fixedValue; value uniform 0; }}
+    top     {{ type zeroGradient; }}
+    ground  {{ type zeroGradient; }}
+    section {{ type zeroGradient; }}
+    defaultFaces {{ type empty; }}
+}}
+""")
+        _write_of_file(case_dir / "0" / "k", "volScalarField", "k", f"""
+dimensions      [0 2 -2 0 0 0 0];
+internalField   uniform {k_inlet};
+boundaryField
+{{
+    inlet   {{ type fixedValue; value uniform {k_inlet}; }}
+    outlet  {{ type inletOutlet; inletValue uniform {k_inlet}; value uniform {k_inlet}; }}
+    top     {{ type zeroGradient; }}
+    ground  {{ type kqRWallFunction; value uniform {k_inlet}; }}
+    section {{ type kqRWallFunction; value uniform {k_inlet}; }}
+    defaultFaces {{ type empty; }}
+}}
+""")
+        _write_of_file(case_dir / "0" / "epsilon", "volScalarField", "epsilon", f"""
+dimensions      [0 2 -3 0 0 0 0];
+internalField   uniform {epsilon_inlet};
+boundaryField
+{{
+    inlet   {{ type fixedValue; value uniform {epsilon_inlet}; }}
+    outlet  {{ type inletOutlet; inletValue uniform {epsilon_inlet}; value uniform {epsilon_inlet}; }}
+    top     {{ type zeroGradient; }}
+    ground  {{ type epsilonWallFunction; value uniform {epsilon_inlet}; }}
+    section {{ type epsilonWallFunction; value uniform {epsilon_inlet}; }}
+    defaultFaces {{ type empty; }}
+}}
+""")
+        _write_of_file(case_dir / "0" / "nut", "volScalarField", "nut", f"""
+dimensions      [0 2 -1 0 0 0 0];
+internalField   uniform {nut_inlet};
+boundaryField
+{{
+    inlet   {{ type calculated; value uniform {nut_inlet}; }}
+    outlet  {{ type calculated; value uniform {nut_inlet}; }}
+    top     {{ type calculated; value uniform {nut_inlet}; }}
+    ground  {{ type nutkWallFunction; value uniform 0; }}
+    section {{ type nutUSpaldingWallFunction; value uniform 0; }}
+    defaultFaces {{ type empty; }}
+}}
+""")
+    else:
+      # U (velocity)
+      _write_of_file(case_dir / "0" / "U", "volVectorField", "U", f"""
 dimensions      [0 1 -1 0 0 0 0];
 internalField   uniform ({Ux} {Uy} 0);
 boundaryField
@@ -109,8 +185,8 @@ boundaryField
 }}
 """)
 
-    # p (pressure)
-    _write_of_file(case_dir / "0" / "p", "volScalarField", "p", f"""
+      # p (pressure)
+      _write_of_file(case_dir / "0" / "p", "volScalarField", "p", f"""
 dimensions      [0 2 -2 0 0 0 0];
 internalField   uniform 0;
 boundaryField
@@ -131,8 +207,8 @@ boundaryField
 }}
 """)
 
-    # k (turbulent kinetic energy)
-    _write_of_file(case_dir / "0" / "k", "volScalarField", "k", f"""
+      # k (turbulent kinetic energy)
+      _write_of_file(case_dir / "0" / "k", "volScalarField", "k", f"""
 dimensions      [0 2 -2 0 0 0 0];
 internalField   uniform {k_inlet};
 boundaryField
@@ -154,8 +230,8 @@ boundaryField
 }}
 """)
 
-    # epsilon (turbulent dissipation)
-    _write_of_file(case_dir / "0" / "epsilon", "volScalarField", "epsilon", f"""
+      # epsilon (turbulent dissipation)
+      _write_of_file(case_dir / "0" / "epsilon", "volScalarField", "epsilon", f"""
 dimensions      [0 2 -3 0 0 0 0];
 internalField   uniform {epsilon_inlet};
 boundaryField
@@ -177,8 +253,8 @@ boundaryField
 }}
 """)
 
-    # nut (turbulent viscosity)
-    _write_of_file(case_dir / "0" / "nut", "volScalarField", "nut", f"""
+      # nut (turbulent viscosity)
+      _write_of_file(case_dir / "0" / "nut", "volScalarField", "nut", f"""
 dimensions      [0 2 -1 0 0 0 0];
 internalField   uniform {nut_inlet};
 boundaryField
@@ -580,9 +656,137 @@ gmsh.finalize()
         raise RuntimeError(f"Structured Gmsh export failed: {result.stderr[:500]}")
 
 
+def _grounded_to_msh(polygon, msh_path, mesh_size, far_field_factor, bl_layers, bl_ratio):
+    """Gmsh .msh for a ground-mounted case: rectangular domain with a ground wall,
+    bodies as bumps on y=0, extruded to a 1-cell slab. `polygon` is the open chain
+    (left ground contact → over bodies → right ground contact, ends on y=0)."""
+    script = f"""
+import gmsh, math
+gmsh.initialize()
+gmsh.option.setNumber("General.Verbosity", 0)
+gmsh.model.add("cfd_grounded")
+geo = gmsh.model.geo
+eps = 1e-6
+ms  = {mesh_size}
+
+chain = {json.dumps(polygon)}
+xs = [p[0] for p in chain]; ys = [p[1] for p in chain]
+xL, xR = min(xs), max(xs); H = max(ys)
+char_dim = max(xR - xL, H)
+margin = char_dim * {far_field_factor}
+x_in, x_out = xL - margin, xR + margin
+y_top = margin
+ff_ms = char_dim * 2.0
+
+# Ordered boundary segments (a, b, type)
+segs = [((x_in, 0.0), tuple(chain[0]), 'ground')]
+for i in range(len(chain) - 1):
+    a, b = chain[i], chain[i + 1]
+    t = 'ground' if (abs(a[1]) < eps and abs(b[1]) < eps) else 'section'
+    segs.append((tuple(a), tuple(b), t))
+segs += [
+    (tuple(chain[-1]), (x_out, 0.0), 'ground'),
+    ((x_out, 0.0), (x_out, y_top), 'outlet'),
+    ((x_out, y_top), (x_in, y_top), 'top'),
+    ((x_in, y_top), (x_in, 0.0), 'inlet'),
+]
+
+ptmap = {{}}
+def getp(xy, h):
+    key = (round(xy[0], 9), round(xy[1], 9))
+    if key not in ptmap:
+        ptmap[key] = geo.addPoint(xy[0], xy[1], 0, h)
+    return ptmap[key]
+
+loop_lines, types = [], []
+wall_pts = set()
+for a, b, t in segs:
+    L = math.hypot(b[0]-a[0], b[1]-a[1])
+    if t in ('section', 'ground'):
+        step, h = ms * 3.0, ms
+    else:
+        step, h = max(ff_ms, L), ff_ms
+    nseg = max(1, int(math.ceil(L / step)))
+    for j in range(nseg):
+        p0 = (a[0]+(b[0]-a[0])*j/nseg,     a[1]+(b[1]-a[1])*j/nseg)
+        p1 = (a[0]+(b[0]-a[0])*(j+1)/nseg, a[1]+(b[1]-a[1])*(j+1)/nseg)
+        g0, g1 = getp(p0, h), getp(p1, h)
+        lid = geo.addLine(g0, g1)
+        loop_lines.append(lid); types.append(t)
+        if t in ('section', 'ground'):
+            wall_pts.add(g0); wall_pts.add(g1)
+
+surf = geo.addPlaneSurface([geo.addCurveLoop(loop_lines)])
+geo.synchronize()
+
+sec_lines = [loop_lines[i] for i in range(len(loop_lines)) if types[i] == 'section']
+wall_lines = [loop_lines[i] for i in range(len(loop_lines)) if types[i] in ('section', 'ground')]
+
+df = gmsh.model.mesh.field.add("Distance")
+gmsh.model.mesh.field.setNumbers(df, "CurvesList", sec_lines)
+tf = gmsh.model.mesh.field.add("Threshold")
+gmsh.model.mesh.field.setNumber(tf, "InField", df)
+gmsh.model.mesh.field.setNumber(tf, "SizeMin", ms * 0.6)
+gmsh.model.mesh.field.setNumber(tf, "SizeMax", ff_ms)
+gmsh.model.mesh.field.setNumber(tf, "DistMin", char_dim * 0.3)
+gmsh.model.mesh.field.setNumber(tf, "DistMax", margin * 0.4)
+gmsh.model.mesh.field.setNumber(tf, "Sigmoid", 1)
+gmsh.model.mesh.field.setAsBackgroundMesh(tf)
+gmsh.option.setNumber("Mesh.MeshSizeExtendFromBoundary", 0)
+gmsh.option.setNumber("Mesh.MeshSizeFromPoints", 0)
+gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 0)
+gmsh.option.setNumber("Mesh.Smoothing", 5)
+
+if {bl_layers} > 0:
+    first_layer = max(2e-4, min(ms * 0.04, char_dim * 0.004))
+    bl = gmsh.model.mesh.field.add("BoundaryLayer")
+    gmsh.model.mesh.field.setNumbers(bl, "CurvesList", wall_lines)
+    gmsh.model.mesh.field.setNumbers(bl, "PointsList", sorted(wall_pts))
+    gmsh.model.mesh.field.setNumber(bl, "Size", first_layer)
+    gmsh.model.mesh.field.setNumber(bl, "Ratio", {bl_ratio})
+    gmsh.model.mesh.field.setNumber(bl, "NbLayers", {bl_layers})
+    gmsh.model.mesh.field.setNumber(bl, "Quads", 1)
+    gmsh.model.mesh.field.setNumber(bl, "IntersectMetrics", 1)
+    gmsh.model.mesh.field.setAsBoundaryLayer(bl)
+
+gmsh.model.mesh.generate(2)
+
+ext = geo.extrude([(2, surf)], 0, 0, 1.0, numElements=[1], recombine=True)
+geo.synchronize()
+top_surf = ext[0][1]; vol = ext[1][1]
+lat = [ext[2 + i][1] for i in range(len(loop_lines))]
+def by(t): return [lat[i] for i in range(len(loop_lines)) if types[i] == t]
+
+gmsh.model.removePhysicalGroups()
+gmsh.model.addPhysicalGroup(3, [vol], tag=10, name="internal")
+gmsh.model.addPhysicalGroup(2, by('section'), tag=1, name="section")
+gmsh.model.addPhysicalGroup(2, by('inlet'),   tag=2, name="inlet")
+gmsh.model.addPhysicalGroup(2, by('outlet'),  tag=3, name="outlet")
+gmsh.model.addPhysicalGroup(2, by('top'),     tag=4, name="top")
+gmsh.model.addPhysicalGroup(2, by('ground'),  tag=5, name="ground")
+gmsh.model.addPhysicalGroup(2, [surf, top_surf], tag=6, name="frontAndBack")
+
+gmsh.model.mesh.generate(3)
+gmsh.option.setNumber("Mesh.MshFileVersion", 2.2)
+gmsh.write(r'{msh_path}')
+print("MSH_OK")
+gmsh.finalize()
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True, text=True, timeout=120,
+    )
+    if "MSH_OK" not in result.stdout:
+        raise RuntimeError(f"Grounded Gmsh export failed: {result.stderr[:800]}")
+
+
 def generate_gmsh_msh(polygon, msh_path, mesh_size=0.2, far_field_factor=15,
-                      bl_layers=4, bl_ratio=1.4, structured=False, wind_speed=20.0):
+                      bl_layers=4, bl_ratio=1.4, structured=False, wind_speed=20.0,
+                      grounded=False):
     """Generate a Gmsh .msh file for OpenFOAM (run in subprocess due to signal issues)."""
+    if grounded:
+        return _grounded_to_msh(polygon, msh_path, mesh_size, far_field_factor,
+                                bl_layers, bl_ratio)
     if structured:
         return _omesh_to_msh(polygon, msh_path, wind_speed, far_field_factor)
     script = f"""
@@ -727,7 +931,7 @@ gmsh.finalize()
 
 def run_openfoam(case_dir, polygon, mesh_size=0.2, far_field_factor=15,
                  bl_layers=5, bl_ratio=1.3, n_procs=1, timeout=None,
-                 structured=False, wind_speed=20.0):
+                 structured=False, wind_speed=20.0, grounded=False):
     """
     Run OpenFOAM simpleFoam via WSL.
 
@@ -765,7 +969,7 @@ method          scotch;
     print(f"  [1/4] Generating Gmsh mesh (BL: {bl_layers} layers, ratio {bl_ratio})...")
     generate_gmsh_msh(polygon, msh_path, mesh_size, far_field_factor,
                       bl_layers=bl_layers, bl_ratio=bl_ratio,
-                      structured=structured, wind_speed=wind_speed)
+                      structured=structured, wind_speed=wind_speed, grounded=grounded)
 
     # Detect the solver the controlDict launches (pimpleFoam=transient, simpleFoam=steady).
     # Used by the structured solver override, the parallel reconstruct step, and the
@@ -778,11 +982,14 @@ method          scotch;
     # and handles skewed meshes better. Limited correction prevents over-correction in
     # highly skewed cells.
     #
+    # Grounded meshes need the same treatment: the body/ground junctions and the BL
+    # produce ~hundreds of >70° non-orthogonal faces, on which the default GAMG diverges.
+    #
     # The override must stay consistent with the solver the controlDict launches:
     # create_openfoam_case() selects pimpleFoam (transient) or simpleFoam (steady).
     # A steady-only fvSolution (SIMPLE block, no *Final solvers / no PIMPLE dict) makes
     # pimpleFoam abort with "Entry 'UFinal' not found", so branch on the actual solver.
-    if structured:
+    if structured or grounded:
         ddt_scheme = "Euler" if is_transient else "steadyState"
         _write_of_file(case_dir / "system" / "fvSchemes", None, None, f"""
 FoamFile
@@ -918,9 +1125,10 @@ python3 -c "
 import re
 with open('boundary','r') as f: txt=f.read()
 txt = re.sub(r'(section[^{{]*{{[^}}]*type\\s+)\\w+', r'\\g<1>wall', txt)
+txt = re.sub(r'(ground[^{{]*{{[^}}]*type\\s+)\\w+', r'\\g<1>wall', txt)
 txt = re.sub(r'(frontAndBack[^{{]*{{[^}}]*type\\s+)\\w+', r'\\g<1>empty', txt)
 with open('boundary','w') as f: f.write(txt)
-print('Boundary: section=wall, frontAndBack=empty, farfield=patch')
+print('Boundary: section/ground=wall, frontAndBack=empty')
 " 2>&1
 cd "{of_case}"
 

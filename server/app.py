@@ -100,10 +100,12 @@ def cfd_mesh(body: dict):
     wind_angle = body.get("windAngle", 0)
     wind_speed = body.get("windSpeed", None)   # optional — improves BL sizing
     structured = body.get("structured", False)
+    grounded   = body.get("grounded", False)
 
     input_data = json.dumps({"polygon": polygon, "meshSize": mesh_size,
                               "farFieldFactor": far_field, "windAngle": wind_angle,
-                              "windSpeed": wind_speed, "structured": structured})
+                              "windSpeed": wind_speed, "structured": structured,
+                              "grounded": grounded})
     script = f"""
 import json, sys
 sys.path.insert(0, r'{PROJECT_ROOT}')
@@ -112,7 +114,8 @@ data = json.loads('''{input_data}''')
 ws = data['windSpeed']
 result = generate_cfd_mesh(data['polygon'], wind_angle=data['windAngle'],
     mesh_size=data['meshSize'], far_field_factor=data['farFieldFactor'],
-    wind_speed=ws if ws else None, structured=data['structured'])
+    wind_speed=ws if ws else None, structured=data['structured'],
+    grounded=data['grounded'])
 print(json.dumps(result))
 """
     try:
@@ -162,6 +165,7 @@ def cfd_solve(body: dict):
     bl_layers  = int(body.get("blLayers", 4))
     bl_ratio   = float(body.get("blRatio", 1.4))
     structured = body.get("structured", False)
+    grounded   = body.get("grounded", False)
 
     import tempfile
     case_dir = tempfile.mkdtemp(prefix="cfd_")
@@ -181,12 +185,14 @@ from tools.cfd_openfoam import create_openfoam_case, run_openfoam, parse_cfd_res
 try:
     polygon = {json.dumps(polygon)}
     mesh = generate_cfd_mesh(polygon, mesh_size={mesh_size}, far_field_factor={far_field},
-        wind_speed={wind_speed}, structured={structured})
+        wind_speed={wind_speed}, structured={structured}, grounded={grounded})
     case = create_openfoam_case(mesh, wind_speed={wind_speed}, wind_angle={wind_angle},
-        output_dir=r'{case_dir}', transient={transient}, end_time={end_time}, dt={dt})
+        output_dir=r'{case_dir}', transient={transient}, end_time={end_time}, dt={dt},
+        grounded={grounded})
     result = run_openfoam(case, polygon, mesh_size={mesh_size}, far_field_factor={far_field},
         bl_layers={bl_layers}, bl_ratio={bl_ratio},
-        structured={structured}, wind_speed={wind_speed}, n_procs={4 if transient else 1})
+        structured={structured}, wind_speed={wind_speed}, n_procs={4 if transient else 1},
+        grounded={grounded})
     result["stats"]    = mesh["stats"]
     result["case_dir"] = r'{case_dir}'
     field_data = parse_cfd_results(r'{case_dir}', section_polygon=polygon)

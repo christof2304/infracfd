@@ -708,7 +708,8 @@ class CFDApp {
                 body: JSON.stringify({
                     polygon: this._polygon,
                     windAngle, meshSize, farField: domainSize,
-                    structured: this._tc2d?.structured ?? false
+                    structured: this._tc2d?.structured ?? false,
+                    grounded: this._tc2d?.grounded ?? false
                 })
             });
             if (!meshRes.ok) throw new Error(await meshRes.text());
@@ -736,7 +737,8 @@ class CFDApp {
                 body: JSON.stringify({
                     polygon: this._polygon, windSpeed, windAngle,
                     meshSize, farField: domainSize, transient, endTime, dt,
-                    structured: this._tc2d?.structured ?? false
+                    structured: this._tc2d?.structured ?? false,
+                    grounded: this._tc2d?.grounded ?? false
                 })
             });
             if (!solveRes.ok) throw new Error(await solveRes.text());

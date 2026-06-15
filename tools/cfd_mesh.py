@@ -242,9 +242,199 @@ def _omesh(polygon, wind_speed, mesh_size, far_field_factor, nu):
 
 # ── Main unstructured mesh (hybrid BL quads + Delaunay triangles) ──────────────
 
+def _grounded_mesh(chain, wind_speed, mesh_size, far_field_factor,
+                   bl_layers, bl_ratio, nu):
+    """Rectangular domain with a ground wall for ground-mounted bodies.
+
+    `chain` is an OPEN polyline running from the left ground contact (y=0) over
+    the body/bodies — dipping back to y=0 between separate bodies — to the right
+    ground contact (y=0). The mesher extends y=0 to the inlet/outlet, closes the
+    box with outlet/top/inlet, and classifies edges:
+      * chain edges with both ends on y=0  → ground (wall)
+      * the inlet→chain[0] and chain[-1]→outlet stubs → ground (wall)
+      * all other chain edges → section (body wall, where forces are measured)
+    No flow passes under the bodies, i.e. they stand on the ground.
+    """
+    import gmsh
+    eps = 1e-6
+
+    xs = [p[0] for p in chain]
+    ys = [p[1] for p in chain]
+    xL, xR = min(xs), max(xs)
+    H       = max(ys)
+    width   = xR - xL
+    char_dim = max(width, H)
+    margin  = char_dim * far_field_factor
+    x_in, x_out = xL - margin, xR + margin
+    y_top   = margin
+    ff_mesh_size = char_dim * 2.0
+
+    # First BL layer height (y⁺ = 50, wall functions) — same model as the free path
+    if wind_speed is not None and wind_speed > 0:
+        Re    = wind_speed * char_dim / nu
+        Cf    = 0.074 / max(Re, 1e4) ** 0.2
+        u_tau = wind_speed * math.sqrt(max(Cf / 2.0, 1e-10))
+        first_layer = max(5e-6, 50.0 * nu / u_tau)
+    else:
+        first_layer = max(2e-4, char_dim * 0.003)
+
+    if bl_layers is None:
+        max_total = char_dim * 0.08
+        max_cell  = mesh_size * 0.3
+        n_ly = 1
+        while n_ly < 25:
+            if first_layer * bl_ratio ** n_ly > max_cell:
+                break
+            if first_layer * (bl_ratio ** n_ly - 1.0) / (bl_ratio - 1.0) > max_total:
+                break
+            n_ly += 1
+        bl_layers = max(4, n_ly)
+    bl_outer = first_layer * bl_ratio ** bl_layers
+
+    gmsh.initialize()
+    gmsh.option.setNumber("General.Verbosity", 0)
+    gmsh.model.add("cfd_grounded")
+    geo = gmsh.model.geo
+
+    def pt(x, y, h=mesh_size):
+        return geo.addPoint(x, y, 0, h)
+
+    p_in_bot  = pt(x_in,  0.0, ff_mesh_size)
+    chain_ids = [pt(x, y) for x, y in chain]
+    p_out_bot = pt(x_out, 0.0, ff_mesh_size)
+    p_out_top = pt(x_out, y_top, ff_mesh_size)
+    p_in_top  = pt(x_in,  y_top, ff_mesh_size)
+
+    # Ordered boundary as (a, b, type)
+    boundary = [(p_in_bot, chain_ids[0], "ground")]
+    for i in range(len(chain) - 1):
+        on_ground = abs(chain[i][1]) < eps and abs(chain[i + 1][1]) < eps
+        boundary.append((chain_ids[i], chain_ids[i + 1],
+                         "ground" if on_ground else "section"))
+    boundary += [
+        (chain_ids[-1], p_out_bot, "ground"),
+        (p_out_bot, p_out_top, "outlet"),
+        (p_out_top, p_in_top, "top"),
+        (p_in_top, p_in_bot, "inlet"),
+    ]
+
+    loop_lines = []
+    groups = {"ground": [], "section": [], "outlet": [], "top": [], "inlet": []}
+    for a, b, typ in boundary:
+        lid = geo.addLine(a, b)
+        loop_lines.append(lid)
+        groups[typ].append(lid)
+
+    surface = geo.addPlaneSurface([geo.addCurveLoop(loop_lines)])
+    geo.synchronize()
+
+    # Background size field — refine near body + ground
+    refine_curves = groups["section"] + groups["ground"]
+    dist_field = gmsh.model.mesh.field.add("Distance")
+    gmsh.model.mesh.field.setNumbers(dist_field, "CurvesList", groups["section"])
+    near_size = max(bl_outer * 2.5, mesh_size * 0.4)
+    thresh = gmsh.model.mesh.field.add("Threshold")
+    gmsh.model.mesh.field.setNumber(thresh, "InField", dist_field)
+    gmsh.model.mesh.field.setNumber(thresh, "SizeMin", near_size)
+    gmsh.model.mesh.field.setNumber(thresh, "SizeMax", ff_mesh_size)
+    gmsh.model.mesh.field.setNumber(thresh, "DistMin", char_dim * 0.3)
+    gmsh.model.mesh.field.setNumber(thresh, "DistMax", margin * 0.4)
+    gmsh.model.mesh.field.setNumber(thresh, "Sigmoid", 1)
+    gmsh.model.mesh.field.setAsBackgroundMesh(thresh)
+
+    gmsh.option.setNumber("Mesh.MeshSizeExtendFromBoundary", 0)
+    gmsh.option.setNumber("Mesh.MeshSizeFromPoints", 0)
+    gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 0)
+    gmsh.option.setNumber("Mesh.Smoothing", 5)
+
+    # Boundary layer on the body walls (and the ground for a clean near-wall layer)
+    corner_pts = []
+    for i in range(1, len(chain) - 1):
+        p0, p1, p2 = chain[i - 1], chain[i], chain[i + 1]
+        v1 = (p0[0] - p1[0], p0[1] - p1[1])
+        v2 = (p2[0] - p1[0], p2[1] - p1[1])
+        l1, l2 = math.hypot(*v1), math.hypot(*v2)
+        if l1 < 1e-10 or l2 < 1e-10 or p1[1] < eps:
+            continue
+        cos_a = max(-1.0, min(1.0, (v1[0]*v2[0] + v1[1]*v2[1]) / (l1 * l2)))
+        if math.degrees(math.acos(cos_a)) < 150.0:
+            corner_pts.append(chain_ids[i])
+
+    bl_field = gmsh.model.mesh.field.add("BoundaryLayer")
+    gmsh.model.mesh.field.setNumbers(bl_field, "CurvesList", refine_curves)
+    if corner_pts:
+        gmsh.model.mesh.field.setNumbers(bl_field, "PointsList", corner_pts)
+    gmsh.model.mesh.field.setNumber(bl_field, "Size", first_layer)
+    gmsh.model.mesh.field.setNumber(bl_field, "Ratio", bl_ratio)
+    gmsh.model.mesh.field.setNumber(bl_field, "NbLayers", bl_layers)
+    gmsh.model.mesh.field.setNumber(bl_field, "Quads", 1)
+    gmsh.model.mesh.field.setAsBoundaryLayer(bl_field)
+    gmsh.option.setNumber("Mesh.Algorithm", 6)
+
+    gmsh.model.addPhysicalGroup(1, groups["section"], tag=1, name="section")
+    gmsh.model.addPhysicalGroup(1, groups["inlet"],   tag=2, name="inlet")
+    gmsh.model.addPhysicalGroup(1, groups["outlet"],  tag=3, name="outlet")
+    gmsh.model.addPhysicalGroup(1, groups["top"],     tag=4, name="top")
+    gmsh.model.addPhysicalGroup(1, groups["ground"],  tag=5, name="ground")
+    gmsh.model.addPhysicalGroup(2, [surface],         tag=1, name="fluid")
+
+    gmsh.model.mesh.generate(2)
+
+    node_tags, node_coords, _ = gmsh.model.mesh.getNodes()
+    nodes, node_map = [], {}
+    for i, tag in enumerate(node_tags):
+        x, y = node_coords[i*3], node_coords[i*3+1]
+        nodes.append({"id": int(tag), "x": round(x, 6), "y": round(y, 6)})
+        node_map[int(tag)] = (x, y)
+
+    triangles, quads = [], []
+    elem_types, elem_tags, elem_node_tags = gmsh.model.mesh.getElements(dim=2)
+    eid = 1
+    for etype, etags, enodes in zip(elem_types, elem_tags, elem_node_tags):
+        if etype == 2:
+            for i in range(len(etags)):
+                triangles.append({"id": eid, "nodes": [int(enodes[i*3]), int(enodes[i*3+1]), int(enodes[i*3+2])]})
+                eid += 1
+        elif etype == 3:
+            for i in range(len(etags)):
+                quads.append({"id": eid, "nodes": [int(enodes[i*4]), int(enodes[i*4+1]), int(enodes[i*4+2]), int(enodes[i*4+3])]})
+                eid += 1
+
+    def node_ids_of(line_ids):
+        s = set()
+        for lid in line_ids:
+            for nt in gmsh.model.mesh.getNodes(dim=1, tag=lid)[0]:
+                s.add(int(nt))
+        return sorted(s)
+
+    section_nodes = node_ids_of(groups["section"])
+    ground_nodes  = node_ids_of(groups["ground"])
+
+    stats = {
+        "n_nodes": len(nodes), "n_triangles": len(triangles), "n_quads": len(quads),
+        "n_elements": len(triangles) + len(quads),
+        "n_section_nodes": len(section_nodes), "n_farfield_nodes": 0,
+        "char_dim": round(char_dim, 4), "far_field_r": round(margin, 3),
+        "bl_layers": bl_layers, "bl_first_layer_mm": round(first_layer * 1000, 4),
+        "n_corners": len(corner_pts), "grounded": True,
+    }
+    gmsh.finalize()
+
+    return {
+        "nodes": nodes, "triangles": triangles, "quads": quads,
+        "boundary_section": section_nodes,
+        "boundary_ground":  ground_nodes,
+        "boundary_farfield": [],
+        "section_polygon": chain,
+        "grounded": True,
+        "wind_angle": 0,
+        "stats": stats,
+    }
+
+
 def generate_cfd_mesh(polygon, wind_angle=0, mesh_size=0.5, far_field_factor=15,
                       bl_layers=None, bl_ratio=1.25, wind_speed=None, nu=1.5e-5,
-                      structured=False):
+                      structured=False, grounded=False):
     """Generate a 2D CFD mesh around a cross-section polygon.
 
     Args:
@@ -262,6 +452,10 @@ def generate_cfd_mesh(polygon, wind_angle=0, mesh_size=0.5, far_field_factor=15,
         dict: nodes, triangles, quads, boundary_section, boundary_farfield,
               section_polygon, wind_angle, stats
     """
+    if grounded:
+        return _grounded_mesh(polygon, wind_speed, mesh_size, far_field_factor,
+                              bl_layers, bl_ratio, nu)
+
     if structured:
         return _omesh(polygon, wind_speed, mesh_size, far_field_factor, nu)
 
