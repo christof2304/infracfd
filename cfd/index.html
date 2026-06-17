@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="de">
+<html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -610,48 +610,48 @@ select.p-input option { background: var(--bg-panel); }
 <!-- ─── Header ────────────────────────────────────────────────── -->
 <header id="header">
     <div class="app-logo">infra<strong>CFD</strong> <span>by geobim.app</span></div>
-    <button class="tab-btn active" data-tab="2d">2D Querschnitt</button>
-    <button class="tab-btn" data-tab="3d">3D Gebäude</button>
+    <button class="tab-btn active" data-tab="2d">2D Cross-section</button>
+    <button class="tab-btn" data-tab="3d">3D Building</button>
     <div class="hdr-spacer"></div>
     <span id="hdr-status"></span>
     <div class="view-toggle" id="view-toggle">
-        <button class="vbtn active" data-view="draw"   title="Zeichnen">✏</button>
-        <button class="vbtn"        data-view="result" title="Ergebnis" id="vbtn-result" disabled>◉</button>
+        <button class="vbtn active" data-view="draw"   title="Draw">✏</button>
+        <button class="vbtn"        data-view="result" title="Result" id="vbtn-result" disabled>◉</button>
     </div>
 </header>
 
 <!-- ─── Sidebar ───────────────────────────────────────────────── -->
 <div id="sidebar">
 
-    <!-- 2D: Bibliothek + Werkzeuge -->
+    <!-- 2D: Library + Tools -->
     <div id="sidebar-2d">
         <div class="sb-section">
-            <div class="sb-label">Querschnitt-Bibliothek</div>
+            <div class="sb-label">Cross-section Library</div>
         </div>
         <div id="example-list-2d" class="example-list"></div>
         <div class="tool-row">
-            <button class="tool-btn active" id="btn-draw" title="Zeichnen (neue Punkte)">✏ Zeichnen</button>
-            <button class="tool-btn" id="btn-select" title="Auswählen / Verschieben">↖ Wählen</button>
-            <button class="tool-btn" id="btn-clear" title="Alles löschen">✕</button>
+            <button class="tool-btn active" id="btn-draw" title="Draw (new points)">✏ Draw</button>
+            <button class="tool-btn" id="btn-select" title="Select / Move">↖ Select</button>
+            <button class="tool-btn" id="btn-clear" title="Clear all">✕</button>
         </div>
         <div class="tool-row">
-            <button class="tool-btn" id="btn-flip-h" title="Horizontal spiegeln (links ↔ rechts)">↔ H</button>
-            <button class="tool-btn" id="btn-flip-v" title="Vertikal spiegeln (oben ↕ unten)">↕ V</button>
+            <button class="tool-btn" id="btn-flip-h" title="Flip horizontally (left ↔ right)">↔ H</button>
+            <button class="tool-btn" id="btn-flip-v" title="Flip vertically (top ↕ bottom)">↕ V</button>
         </div>
     </div>
 
-    <!-- 3D: Gebäude-Bibliothek + GLB -->
+    <!-- 3D: Building Library + GLB -->
     <div id="sidebar-3d">
         <div class="sb-section">
-            <div class="sb-label">Gebäude-Testfälle</div>
+            <div class="sb-label">Building Test Cases</div>
         </div>
         <div id="example-list-3d" class="example-list"></div>
     </div>
 
-    <!-- Ergebnisse: nichts / placeholder -->
+    <!-- Results: empty / placeholder -->
     <div id="sidebar-results">
         <div class="sb-section">
-            <div class="sb-label">Ergebnis-Info</div>
+            <div class="sb-label">Result Info</div>
         </div>
         <div class="example-list">
             <div id="result-info" style="padding:4px 2px;font-size:11px;color:var(--text-dim);line-height:1.6"></div>
@@ -688,22 +688,22 @@ select.p-input option { background: var(--bg-panel); }
 
     <!-- Animation controls (2D transient) -->
     <div id="anim-bar" class="hidden">
-        <button class="anim-btn" id="anim-first" title="Erster Zeitschritt">⏮</button>
-        <button class="anim-btn" id="anim-prev"  title="Zurück">◀</button>
-        <button class="anim-btn" id="anim-play"  title="Abspielen">▶</button>
-        <button class="anim-btn" id="anim-next"  title="Vor">▶▶</button>
-        <button class="anim-btn" id="anim-last"  title="Letzter Zeitschritt">⏭</button>
+        <button class="anim-btn" id="anim-first" title="First time step">⏮</button>
+        <button class="anim-btn" id="anim-prev"  title="Back">◀</button>
+        <button class="anim-btn" id="anim-play"  title="Play">▶</button>
+        <button class="anim-btn" id="anim-next"  title="Forward">▶▶</button>
+        <button class="anim-btn" id="anim-last"  title="Last time step">⏭</button>
         <input type="range" id="anim-slider" min="0" value="0">
         <span id="anim-time">t = 0 s</span>
     </div>
 
     <!-- Animation controls (3D transient) -->
     <div id="anim-bar-3d" class="hidden">
-        <button class="anim-btn" id="anim3d-first" title="Erster Zeitschritt">⏮</button>
-        <button class="anim-btn" id="anim3d-prev"  title="Zurück">◀</button>
-        <button class="anim-btn" id="anim3d-play"  title="Abspielen">▶</button>
-        <button class="anim-btn" id="anim3d-next"  title="Vor">▶▶</button>
-        <button class="anim-btn" id="anim3d-last"  title="Letzter Zeitschritt">⏭</button>
+        <button class="anim-btn" id="anim3d-first" title="First time step">⏮</button>
+        <button class="anim-btn" id="anim3d-prev"  title="Back">◀</button>
+        <button class="anim-btn" id="anim3d-play"  title="Play">▶</button>
+        <button class="anim-btn" id="anim3d-next"  title="Forward">▶▶</button>
+        <button class="anim-btn" id="anim3d-last"  title="Last time step">⏭</button>
         <input type="range" id="anim3d-slider" min="0" value="0">
         <span id="anim3d-time">t = 0 s</span>
     </div>
@@ -715,11 +715,11 @@ select.p-input option { background: var(--bg-panel); }
 
     <!-- Result coefficients overlay -->
     <div id="result-panel">
-        <div style="color:var(--accent);font-size:11px;font-weight:600;margin-bottom:8px;letter-spacing:0.05em">KRAFTBEIWERTE</div>
+        <div style="color:var(--accent);font-size:11px;font-weight:600;margin-bottom:8px;letter-spacing:0.05em">FORCE COEFFICIENTS</div>
         <div class="coeff-row"><span class="coeff-label">c<sub>D</sub></span><span class="coeff-val" id="coeff-cd">—</span></div>
         <div class="coeff-row"><span class="coeff-label">c<sub>L</sub></span><span class="coeff-val" id="coeff-cl">—</span></div>
         <div class="coeff-row"><span class="coeff-label">c<sub>M</sub></span><span class="coeff-val" id="coeff-cm">—</span></div>
-        <div style="margin-top:8px;font-size:10px;color:var(--text-dim)">Bereich: <span id="result-range" style="font-family:var(--font-mono)">—</span></div>
+        <div style="margin-top:8px;font-size:10px;color:var(--text-dim)">Range: <span id="result-range" style="font-family:var(--font-mono)">—</span></div>
     </div>
 </div>
 
@@ -731,41 +731,50 @@ select.p-input option { background: var(--bg-panel); }
         <div class="p-section">
             <div class="p-label">Wind</div>
             <div class="p-row">
-                <label>Geschwindigkeit [m/s]</label>
+                <label>Speed [m/s]</label>
                 <input type="number" id="wind-speed" class="p-input" value="20" min="1" max="200" step="5">
             </div>
             <div class="p-row">
-                <label>Richtung [°]</label>
+                <label>Direction [°]</label>
                 <input type="number" id="wind-angle" class="p-input" value="0" min="-180" max="180" step="5">
             </div>
         </div>
 
         <div class="p-section">
             <div class="p-label">Mesh</div>
-            <label style="font-size:11px;color:var(--text-dim);display:block;margin-bottom:3px">Berechnungsraum: <span id="domain-val" style="color:var(--text-mono)">15×</span></label>
+            <label style="font-size:11px;color:var(--text-dim);display:block;margin-bottom:3px">Computational domain: <span id="domain-val" style="color:var(--text-mono)">15×</span></label>
             <input type="range" id="domain-size" class="p-slider" min="8" max="30" value="15" step="1"
                 oninput="document.getElementById('domain-val').textContent=this.value+'×'">
-            <div class="p-slider-row"><span>klein</span><span>groß</span></div>
+            <div class="p-slider-row"><span>small</span><span>large</span></div>
 
-            <label style="font-size:11px;color:var(--text-dim);display:block;margin-bottom:3px">Mesh-Dichte: <span id="density-val" style="color:var(--text-mono)">50%</span></label>
+            <label style="font-size:11px;color:var(--text-dim);display:block;margin-bottom:3px">Mesh density: <span id="density-val" style="color:var(--text-mono)">50%</span></label>
             <input type="range" id="mesh-density" class="p-slider" min="10" max="100" value="50" step="5"
                 oninput="document.getElementById('density-val').textContent=this.value+'%'" style="accent-color:#44bb44">
-            <div class="p-slider-row"><span>grob (schnell)</span><span>fein (langsam)</span></div>
+            <div class="p-slider-row"><span>coarse (fast)</span><span>fine (slow)</span></div>
         </div>
 
         <div class="p-section">
             <div class="p-label">Simulation</div>
+            <div class="p-row">
+                <label>Turbulence model</label>
+                <select id="turbulence-model" class="p-input">
+                    <option value="kEpsilon">k-ε (Standard)</option>
+                    <option value="realizableKE">realizable k-ε</option>
+                    <option value="RNGkEpsilon">RNG k-ε</option>
+                    <option value="kOmegaSST">k-ω SST (rec. for lift)</option>
+                </select>
+            </div>
             <div class="p-checkbox-row">
                 <input type="checkbox" id="transient">
-                <label for="transient">Transient (Wirbelablösung)</label>
+                <label for="transient">Transient (vortex shedding)</label>
             </div>
             <div id="transient-opts" style="display:none" class="p-sub">
                 <div class="p-row">
-                    <label>Endzeit [s]</label>
+                    <label>End time [s]</label>
                     <input type="number" id="end-time" class="p-input" value="2" min="0.5" max="20" step="0.5">
                 </div>
                 <div class="p-row">
-                    <label>Zeitschritt [s]</label>
+                    <label>Time step [s]</label>
                     <input type="number" id="dt" class="p-input" value="0.002" min="0.0001" max="0.1" step="0.001">
                 </div>
             </div>
@@ -773,15 +782,15 @@ select.p-input option { background: var(--bg-panel); }
 
         <button class="run-btn" id="btn-mesh-only" disabled
             style="background:rgba(61,158,255,0.10);border-color:var(--accent);color:var(--accent);margin-bottom:6px">
-            ⬡ Nur Mesh erzeugen
+            ⬡ Generate mesh only
         </button>
-        <button class="run-btn" id="btn-run-2d" disabled>▶ OpenFOAM Berechnung</button>
-        <button id="btn-clear-2d" style="width:100%;margin-top:4px;padding:4px;background:none;border:1px solid var(--border);border-radius:4px;color:var(--text-dim);cursor:pointer;font-size:11px;font-family:var(--font-ui);display:none" title="Ergebnisse und Ansicht zurücksetzen">× Ergebnisse leeren</button>
+        <button class="run-btn" id="btn-run-2d" disabled>▶ OpenFOAM Computation</button>
+        <button id="btn-clear-2d" style="width:100%;margin-top:4px;padding:4px;background:none;border:1px solid var(--border);border-radius:4px;color:var(--text-dim);cursor:pointer;font-size:11px;font-family:var(--font-ui);display:none" title="Reset results and view">× Clear results</button>
 
         <!-- Dimensional forces — shown after solve -->
         <div id="forces-section" style="display:none;margin-top:10px">
             <div class="p-section">
-                <div class="p-label">Kräfte pro Meter [kN/m]</div>
+                <div class="p-label">Forces per meter [kN/m]</div>
                 <table class="forces-table">
                     <tr><td>q = ½ρv²</td><td id="f-q">—</td></tr>
                     <tr><td>H<sub>ref</sub></td><td id="f-href">—</td></tr>
@@ -795,41 +804,41 @@ select.p-input option { background: var(--bg-panel); }
 
             <!-- Cp distribution chart -->
             <div class="p-section">
-                <div class="cp-label">Cp-Verteilung</div>
+                <div class="cp-label">Cp distribution</div>
                 <div id="cp-chart-wrap">
                     <svg id="cp-svg" height="90" viewBox="0 0 240 90" xmlns="http://www.w3.org/2000/svg">
                         <text x="120" y="45" text-anchor="middle" fill="#445566"
-                              font-size="10" font-family="JetBrains Mono">Noch keine Daten</text>
+                              font-size="10" font-family="JetBrains Mono">No data yet</text>
                     </svg>
                 </div>
             </div>
         </div>
 
         <div class="p-section" style="margin-top:14px">
-            <div class="p-label">Darstellung</div>
+            <div class="p-label">Display</div>
             <select id="result-field" class="p-input">
-                <option value="mesh">Netz (Mesh only)</option>
-                <option value="pressure">Druck (p)</option>
-                <option value="speed">Geschwindigkeit (|U|)</option>
+                <option value="mesh">Mesh (Mesh only)</option>
+                <option value="pressure">Pressure (p)</option>
+                <option value="speed">Velocity (|U|)</option>
                 <option value="vorticity">Vorticity (ωz)</option>
-                <option value="turb_k">Turbulente Energie (k)</option>
+                <option value="turb_k">Turbulent energy (k)</option>
             </select>
             <div class="p-checkbox-row" style="margin-top:6px">
                 <input type="checkbox" id="show-vectors" style="accent-color:var(--accent)">
-                <label for="show-vectors">Geschwindigkeitsvektoren</label>
+                <label for="show-vectors">Velocity vectors</label>
             </div>
             <div class="p-checkbox-row" style="margin-top:4px">
                 <input type="checkbox" id="show-streamlines-2d" style="accent-color:var(--mint)">
-                <label for="show-streamlines-2d">Stromlinien</label>
+                <label for="show-streamlines-2d">Streamlines</label>
             </div>
             <div id="sl2d-opts" style="display:none;margin-left:18px;margin-top:3px">
                 <div class="p-row" style="margin-bottom:3px">
-                    <label style="font-size:10px">Anzahl</label>
+                    <label style="font-size:10px">Count</label>
                     <input type="number" id="sl2d-nseeds" class="p-input" value="28" min="5" max="120" step="5" style="width:52px">
                 </div>
                 <div class="p-checkbox-row">
                     <input type="checkbox" id="sl2d-no-bg" style="accent-color:var(--mint)">
-                    <label for="sl2d-no-bg" style="font-size:10px">Ohne Hintergrund</label>
+                    <label for="sl2d-no-bg" style="font-size:10px">No background</label>
                 </div>
             </div>
         </div>
@@ -838,52 +847,52 @@ select.p-input option { background: var(--bg-panel); }
     <!-- 3D params -->
     <div id="params-3d">
         <div class="p-section">
-            <div class="p-label">Modell laden</div>
+            <div class="p-label">Load model</div>
             <button class="upload-btn" id="btn-upload-glb">GLB / STL Upload</button>
             <input type="file" id="input-glb" accept=".glb,.stl" style="display:none">
             <div id="glb-info"></div>
             <div class="p-row">
-                <label>Skalierung</label>
+                <label>Scale</label>
                 <input type="number" id="glb-scale" class="p-input" value="1" min="0.001" max="1000" step="0.1">
-                <button id="btn-apply-scale" style="padding:3px 7px;border-radius:3px;border:1px solid var(--border-hi);background:var(--accent-dim);color:var(--accent);cursor:pointer;font-size:10px" title="Scale neu anwenden">↻</button>
+                <button id="btn-apply-scale" style="padding:3px 7px;border-radius:3px;border:1px solid var(--border-hi);background:var(--accent-dim);color:var(--accent);cursor:pointer;font-size:10px" title="Reapply scale">↻</button>
             </div>
         </div>
 
         <div class="p-section">
             <div class="p-label">Wind</div>
             <div class="p-row">
-                <label>Geschwindigkeit [m/s]</label>
+                <label>Speed [m/s]</label>
                 <input type="number" id="wind-speed-3d" class="p-input" value="20" min="1" max="200" step="5">
             </div>
             <div class="p-row">
-                <label>Richtung [°]</label>
+                <label>Direction [°]</label>
                 <input type="number" id="wind-angle-3d" class="p-input" value="0" min="-180" max="180" step="15">
             </div>
             <div class="p-row">
-                <label>Gebäudehöhe [m]</label>
+                <label>Building height [m]</label>
                 <input type="number" id="building-height" class="p-input" value="40" min="5" max="500" step="5">
             </div>
             <div class="p-row">
-                <label>Rauhigkeit z₀ [m]</label>
+                <label>Roughness z₀ [m]</label>
                 <input type="number" id="roughness" class="p-input" value="0.1" min="0.001" max="2" step="0.05">
             </div>
         </div>
 
         <div class="p-section">
             <div class="p-label">Mesh</div>
-            <label style="font-size:11px;color:var(--text-dim);display:block;margin-bottom:3px">Berechnungsraum: <span id="domain-val-3d" style="color:var(--text-mono)">3×</span></label>
+            <label style="font-size:11px;color:var(--text-dim);display:block;margin-bottom:3px">Computational domain: <span id="domain-val-3d" style="color:var(--text-mono)">3×</span></label>
             <input type="range" id="domain-size-3d" class="p-slider" min="2" max="8" value="3" step="1"
                 oninput="document.getElementById('domain-val-3d').textContent=this.value+'×'">
-            <div class="p-slider-row"><span>eng</span><span>weit</span></div>
+            <div class="p-slider-row"><span>narrow</span><span>wide</span></div>
 
-            <label style="font-size:11px;color:var(--text-dim);display:block;margin:8px 0 3px" title="Zellgröße an der Gebäudewand (relativ zur Höhe). Fein = runde Wände folgen besser, aber deutlich mehr Zellen und längere Rechenzeit.">Mesh-Dichte: <span id="density-val-3d" style="color:var(--text-mono)">50%</span></label>
+            <label style="font-size:11px;color:var(--text-dim);display:block;margin:8px 0 3px" title="Cell size at the building wall (relative to height). Fine = curved walls follow better, but significantly more cells and longer computation time.">Mesh density: <span id="density-val-3d" style="color:var(--text-mono)">50%</span></label>
             <input type="range" id="mesh-density-3d" class="p-slider" min="10" max="100" value="50" step="5"
                 oninput="document.getElementById('density-val-3d').textContent=this.value+'%'" style="accent-color:#44bb44">
-            <div class="p-slider-row"><span>grob (schnell)</span><span>fein (langsam)</span></div>
+            <div class="p-slider-row"><span>coarse (fast)</span><span>fine (slow)</span></div>
 
             <div id="steady-opts-3d">
                 <div class="p-row" style="margin-top:8px">
-                    <label title="Maximale Solver-Iterationen (stationär). Mehr = genauer, aber langsamer. Stoppt früher, sobald konvergiert.">Iterationen</label>
+                    <label title="Maximum solver iterations (steady). More = more accurate, but slower. Stops earlier once converged.">Iterations</label>
                     <input type="number" id="iterations-3d" class="p-input" value="500" min="50" max="3000" step="50">
                 </div>
             </div>
@@ -893,28 +902,28 @@ select.p-input option { background: var(--bg-panel); }
             <div class="p-label">Simulation</div>
             <div class="p-checkbox-row">
                 <input type="checkbox" id="transient-3d">
-                <label for="transient-3d">Instationär (pimpleFoam)</label>
+                <label for="transient-3d">Transient (pimpleFoam)</label>
             </div>
             <div id="transient-opts-3d" style="display:none" class="p-sub">
                 <div class="p-row">
-                    <label>Endzeit [s]</label>
+                    <label>End time [s]</label>
                     <input type="number" id="end-time-3d" class="p-input" value="5" min="0.5" max="300" step="0.5">
                 </div>
                 <div id="end-time-3d-hint" style="font-size:10px;color:var(--text-dim);margin-top:-2px;margin-bottom:4px"></div>
                 <div class="p-row">
-                    <label>Zeitschritt [s]</label>
+                    <label>Time step [s]</label>
                     <input type="number" id="dt-3d" class="p-input" value="0.05" min="0.001" max="0.5" step="0.005">
                 </div>
             </div>
         </div>
 
-        <button class="run-btn" id="btn-run-3d">▶ 3D OpenFOAM Berechnung</button>
-        <button id="btn-clear-3d" style="width:100%;margin-top:4px;padding:4px;background:none;border:1px solid var(--border);border-radius:4px;color:var(--text-dim);cursor:pointer;font-size:11px;font-family:var(--font-ui);display:none" title="Ergebnisse und Ansicht zurücksetzen">× Ergebnisse leeren</button>
+        <button class="run-btn" id="btn-run-3d">▶ 3D OpenFOAM Computation</button>
+        <button id="btn-clear-3d" style="width:100%;margin-top:4px;padding:4px;background:none;border:1px solid var(--border);border-radius:4px;color:var(--text-dim);cursor:pointer;font-size:11px;font-family:var(--font-ui);display:none" title="Reset results and view">× Clear results</button>
 
-        <!-- Schnittebenen — sichtbar sobald Modell geladen -->
+        <!-- Section planes — visible once model is loaded -->
         <div id="slices-3d-controls" style="display:none">
             <div class="p-section" style="margin-top:10px">
-                <div class="p-label">Schnittebenen</div>
+                <div class="p-label">Section planes</div>
 
                 <!-- Horizontal (z) -->
                 <div class="p-row" style="margin-bottom:2px">
@@ -926,41 +935,41 @@ select.p-input option { background: var(--bg-panel); }
                 </div>
                 <input type="range" id="sl3d-hz" class="p-slider" min="0" max="1" step="0.01" value="0.25">
 
-                <!-- Vertikal (y) -->
+                <!-- Vertical (y) -->
                 <div class="p-row" style="margin-bottom:2px;margin-top:8px">
                     <input type="checkbox" id="show-vt-plane" checked
                         style="accent-color:#ffaa44;cursor:pointer">
                     <label for="show-vt-plane" style="flex:1;color:#ffaa44;font-weight:600">
-                        Vertikal y =</label>
+                        Vertical y =</label>
                     <span id="sl3d-vt-val" class="p-val" style="color:#ffaa44">—</span>
                 </div>
                 <input type="range" id="sl3d-vt" class="p-slider" min="0" max="1" step="0.01" value="0.5"
                     style="accent-color:#ffaa44">
             </div>
 
-            <!-- Ergebnis-Controls — erst nach Solve sichtbar -->
+            <!-- Result controls — visible only after solve -->
             <div id="result-controls-3d" style="display:none">
                 <div class="p-section">
-                    <div class="p-label">Ergebnis-Feld</div>
+                    <div class="p-label">Result field</div>
                     <select id="result-field-3d" class="p-input">
-                        <option value="pressure">Druck (p)</option>
-                        <option value="speed">Geschwindigkeit (|U|)</option>
-                        <option value="turb_k">Turbulenz k</option>
+                        <option value="pressure">Pressure (p)</option>
+                        <option value="speed">Velocity (|U|)</option>
+                        <option value="turb_k">Turbulence k</option>
                     </select>
                 </div>
                 <div class="p-section">
-                    <div class="p-label">Einblendungen</div>
+                    <div class="p-label">Overlays</div>
                     <div class="p-checkbox-row">
                         <input type="checkbox" id="show-vectors-3d" style="accent-color:var(--accent)">
-                        <label for="show-vectors-3d">Vektoren</label>
+                        <label for="show-vectors-3d">Vectors</label>
                     </div>
                     <div class="p-checkbox-row">
                         <input type="checkbox" id="show-streamlines-3d" style="accent-color:var(--mint)">
-                        <label for="show-streamlines-3d">Stromlinien</label>
+                        <label for="show-streamlines-3d">Streamlines</label>
                     </div>
                     <div id="sl3d-stream-opts" style="display:none;margin-left:18px">
                         <div class="p-row" style="margin-bottom:2px">
-                            <label style="font-size:10px">Höhenbereich</label>
+                            <label style="font-size:10px">Height range</label>
                         </div>
                         <input type="range" id="sl3d-szmin" class="p-slider" min="0" max="100" value="0"
                             style="accent-color:var(--mint)">
@@ -973,14 +982,14 @@ select.p-input option { background: var(--bg-panel); }
                     </div>
                     <div class="p-checkbox-row">
                         <input type="checkbox" id="show-surface-lines-3d" style="accent-color:var(--mint)">
-                        <label for="show-surface-lines-3d">Oberflächenstromlinien</label>
+                        <label for="show-surface-lines-3d">Surface streamlines</label>
                     </div>
                 </div>
 
                 <!-- Force coefficient time series (transient only) -->
                 <div id="force-plot-section-3d" style="display:none">
                     <div class="p-section" style="margin-top:8px">
-                        <div class="p-label" style="margin-bottom:4px">Kraftbeiwerte Cd / Cl (t)</div>
+                        <div class="p-label" style="margin-bottom:4px">Force coefficients Cd / Cl (t)</div>
                         <canvas id="force-plot-3d"></canvas>
                     </div>
                 </div>
@@ -992,7 +1001,7 @@ select.p-input option { background: var(--bg-panel); }
 
 <!-- ─── Status bar ────────────────────────────────────────────── -->
 <div id="statusbar">
-    <span id="statusbar-msg" class="status-msg">Bereit</span>
+    <span id="statusbar-msg" class="status-msg">Ready</span>
     <span id="statusbar-progress" style="display:none"></span>
     <span id="statusbar-stats" style="display:none;margin-left:auto;
           font-family:var(--font-mono);font-size:10px;color:var(--text-dim);

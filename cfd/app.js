@@ -178,6 +178,19 @@ class CFDApp {
         });
     }
 
+    _meshSize2D(density) {
+        // Element size RELATIVE to geometry size (mirrors the 3D path), so a small
+        // wind-tunnel model (e.g. RUB, char_dim ≈ 0.37 m) and a full-scale bridge
+        // (≈ 30 m) get comparable resolution at the same slider %. The old absolute
+        // map (0.05–0.55 m) was far too coarse for model-scale geometries.
+        // factor = approx. cells across char_dim: ~20 (coarse) … 100 (fine).
+        const xs = this._polygon.map(p => p[0]), ys = this._polygon.map(p => p[1]);
+        const charDim = Math.max(Math.max(...xs) - Math.min(...xs),
+                                 Math.max(...ys) - Math.min(...ys)) || 1;
+        const factor = 20 + (density - 10) / 90 * (100 - 20);
+        return charDim / factor;
+    }
+
     _loadCase(idx) {
         const tc = CFD_TEST_CASES[idx];
         if (!tc || tc.mode === '3d') return;
@@ -186,28 +199,53 @@ class CFDApp {
         document.getElementById('wind-speed').value = tc.windSpeed;
         document.getElementById('wind-angle').value = 0;
         document.getElementById('mesh-density').value = 50;
+        document.getElementById('turbulence-model').value = tc.turbulenceModel || 'kEpsilon';
         this._setTab('2d');
         this._resetResult();
         this._drawWindIndicator(0, tc.windSpeed);
-        this._setStatus(`Geladen: ${tc.name} — ${tc.desc}`);
+        this._setStatus(`Loaded: ${tc.name} — ${tc.desc}`);
     }
 
     _loadCase3D(idx) {
         const tc = CFD_TEST_CASES[idx];
         if (!tc || tc.mode !== '3d') return;
-        const maxH = tc.buildings ? Math.max(...tc.buildings.map(b => b.height)) : tc.height;
-        document.getElementById('wind-speed-3d').value = tc.windSpeed;
-        document.getElementById('building-height').value = maxH;
-        document.getElementById('roughness').value = tc.z0 || 0.1;
         this._tc3d = tc;
         this._setTab('3d');
-        this._setStatus(`Geladen: ${tc.name} — ${tc.desc}`);
         this._viewer.clear();
         this._viewer.clear3DResult?.();
         this._3dCaseDir = null;
         this._lastSlice = null;
         document.getElementById('result-controls-3d').style.display = 'none';
+        document.getElementById('wind-speed-3d').value = tc.windSpeed;
+        document.getElementById('roughness').value = tc.z0 || 0.1;
         const angle0 = parseFloat(document.getElementById('wind-angle-3d').value) || 0;
+
+        if (tc.glb) {
+            // GLB-backed library model — drive the same path as a manual upload.
+            this._glbUrl    = tc.glb;
+            this._glbScale  = tc.glbScale || 1;
+            this._glbBounds = tc.glbBounds || null;
+            this._glbName   = tc.name;
+            document.getElementById('building-height').value = tc.height || 0;
+            const gs = document.getElementById('glb-scale'); if (gs) gs.value = this._glbScale;
+            this._updateGlbInfo();
+            this._setStatus(`Loaded: ${tc.name} — ${tc.desc}`);
+            this._viewer.loadGLB(API_BASE + tc.glb, this._glbScale, ({ done, error, box }) => {
+                if (error) { this._setStatus(`Error: ${error}`, 'error'); }
+                else if (done) {
+                    this._setStatus(`Model loaded: ${tc.name}`);
+                    this._setBboxFromGlbBounds();
+                    if (box) { this._3dModelBox = box; this._viewer.showWindArrow3D(box, angle0); }
+                }
+            });
+            return;
+        }
+
+        // Parametric building case
+        this._glbUrl = null;
+        const maxH = tc.buildings ? Math.max(...tc.buildings.map(b => b.height)) : tc.height;
+        document.getElementById('building-height').value = maxH;
+        this._setStatus(`Loaded: ${tc.name} — ${tc.desc}`);
         if (tc.buildings?.length > 1) {
             this._showMultiBuildingPreview(tc.buildings, angle0);
         } else {
@@ -363,7 +401,7 @@ class CFDApp {
         input.addEventListener('change', async () => {
             const file = input.files?.[0];
             if (!file) return;
-            this._setStatus('Hochladen…');
+            this._setStatus('Uploading…');
             const fd = new FormData();
             fd.append('file', file);
             try {
@@ -374,22 +412,23 @@ class CFDApp {
                 this._glbBounds = data.bounds;
                 this._glbName   = file.name;
                 this._glbScale  = parseFloat(scale.value) || 1;
+                this._tc3d      = null;   // manual upload: no library case → no stale meshSize
                 this._updateGlbInfo();
                 this._viewer.clear();
                 this._viewer.loadGLB(API_BASE + data.url, this._glbScale, ({ done, pct, error, box }) => {
-                    if (error) { console.error('[GLB] load error:', error); this._setStatus(`Fehler: ${error}`, 'error'); }
+                    if (error) { console.error('[GLB] load error:', error); this._setStatus(`Error: ${error}`, 'error'); }
                     else if (done) {
-                        this._setStatus(`Modell geladen`);
+                        this._setStatus(`Model loaded`);
                         this._setBboxFromGlbBounds();
                         if (box) {
                             this._3dModelBox = box;
                             const angle = parseFloat(document.getElementById('wind-angle-3d').value) || 0;
                             this._viewer.showWindArrow3D(box, angle);
                         }
-                    } else this._setStatus(`Laden ${Math.round((pct || 0) * 100)}%`);
+                    } else this._setStatus(`Loading ${Math.round((pct || 0) * 100)}%`);
                 });
             } catch (e) {
-                this._setStatus(`Upload-Fehler: ${e.message}`, 'error');
+                this._setStatus(`Upload error: ${e.message}`, 'error');
             }
         });
 
@@ -612,14 +651,14 @@ class CFDApp {
         this._meshData = null;
         this._viewer.clear();
         this._updateRunBtn();
-        this._setStatus('Mesh generieren…');
+        this._setStatus('Generating mesh…');
         this._showLog();
 
         const density    = parseInt(document.getElementById('mesh-density').value) || 50;
         const domainSize = parseFloat(document.getElementById('domain-size').value) || 15;
         const windAngle  = parseFloat(document.getElementById('wind-angle').value) || 0;
         const windSpeed  = parseFloat(document.getElementById('wind-speed').value) || null;
-        const meshSize   = 0.5 * (1 - density / 100) + 0.05;
+        const meshSize   = this._meshSize2D(density);
 
         try {
             const res = await fetch(api('/api/cfd/mesh'), {
@@ -637,9 +676,9 @@ class CFDApp {
             // Convert to the field format expected by showMeshOnly
             const fakeResult = { field: data };
             const nq = data.stats?.n_quads ?? 0;
-            const blInfo = nq > 0 ? `, ${nq} BL-Quads (${data.stats?.bl_layers} Lagen, y₁=${data.stats?.bl_first_layer_mm} mm)` : '';
-            this._setStatus(`Mesh: ${data.stats?.n_nodes ?? '?'} Knoten, ${data.stats?.n_triangles ?? '?'} Dreiecke${blInfo}`, 'ok');
-            this._appendLog(`✓ Mesh erzeugt: ${data.stats?.n_nodes} Knoten, ${data.stats?.n_triangles} Dreiecke`);
+            const blInfo = nq > 0 ? `, ${nq} BL quads (${data.stats?.bl_layers} layers, y₁=${data.stats?.bl_first_layer_mm} mm)` : '';
+            this._setStatus(`Mesh: ${data.stats?.n_nodes ?? '?'} nodes, ${data.stats?.n_triangles ?? '?'} triangles${blInfo}`, 'ok');
+            this._appendLog(`✓ Mesh generated: ${data.stats?.n_nodes} nodes, ${data.stats?.n_triangles} triangles`);
 
             this._viewer.showMeshOnly(fakeResult);
             this._viewer.showPolygon(this._polygon);
@@ -650,8 +689,8 @@ class CFDApp {
             this._enableResultBtn();
             this._setView('result');
         } catch (e) {
-            this._setStatus('Mesh-Fehler: ' + e.message, 'error');
-            this._appendLog('Fehler: ' + e.message);
+            this._setStatus('Mesh error: ' + e.message, 'error');
+            this._appendLog('Error: ' + e.message);
         }
 
         this._solving = false;
@@ -695,10 +734,11 @@ class CFDApp {
         const endTime    = parseFloat(document.getElementById('end-time').value) || 2;
         const dt         = parseFloat(document.getElementById('dt').value) || 0.002;
         const domainSize = parseFloat(document.getElementById('domain-size').value) || 15;
+        const turbulenceModel = document.getElementById('turbulence-model').value || 'kEpsilon';
 
-        const meshSize   = 0.5 * (1 - density / 100) + 0.05;
+        const meshSize   = this._meshSize2D(density);
 
-        this._setStatus('Mesh generieren…');
+        this._setStatus('Generating mesh…');
         this._showLog();
 
         try {
@@ -716,18 +756,18 @@ class CFDApp {
             this._meshData = await meshRes.json();
             const _nq = this._meshData.stats?.n_quads ?? 0;
             const _nt = this._meshData.stats?.n_triangles ?? 0;
-            const _cellInfo = _nq > 0 ? `${_nq} Quads` : `${_nt} Dreiecke`;
-            this._appendLog(`Mesh: ${this._meshData.stats?.n_nodes ?? '?'} Knoten, ${_cellInfo}`);
+            const _cellInfo = _nq > 0 ? `${_nq} quads` : `${_nt} triangles`;
+            this._appendLog(`Mesh: ${this._meshData.stats?.n_nodes ?? '?'} nodes, ${_cellInfo}`);
         } catch (e) {
-            this._appendLog(`Mesh-Fehler: ${e.message}`);
-            this._setStatus('Mesh-Fehler', 'error');
+            this._appendLog(`Mesh error: ${e.message}`);
+            this._setStatus('Mesh error', 'error');
             this._solving = false;
             this._updateRunBtn();
             return;
         }
 
-        this._setStatus('OpenFOAM läuft…');
-        this._appendLog('▶ OpenFOAM Berechnung gestartet…');
+        this._setStatus('OpenFOAM running…');
+        this._appendLog('▶ OpenFOAM computation started…');
 
         // Await solve start — ensures server has cleared old queue before we open the stream
         try {
@@ -738,13 +778,17 @@ class CFDApp {
                     polygon: this._polygon, windSpeed, windAngle,
                     meshSize, farField: domainSize, transient, endTime, dt,
                     structured: this._tc2d?.structured ?? false,
-                    grounded: this._tc2d?.grounded ?? false
+                    grounded: this._tc2d?.grounded ?? false,
+                    turbulenceModel,
+                    turbulenceLengthScale: this._tc2d?.turbulenceLengthScale,
+                    turbulenceIntensity: this._tc2d?.turbulenceIntensity,
+                    nu: this._tc2d?.nu
                 })
             });
             if (!solveRes.ok) throw new Error(await solveRes.text());
         } catch (e) {
-            this._appendLog(`Fehler beim Starten: ${e.message}`);
-            this._setStatus('Fehler', 'error');
+            this._appendLog(`Error on start: ${e.message}`);
+            this._setStatus('Error', 'error');
             this._solving = false;
             this._updateRunBtn();
             return;
@@ -777,7 +821,7 @@ class CFDApp {
         this._anim3dCache       = [];
         this._anim3dPrefetchGen = (this._anim3dPrefetchGen ?? 0) + 1;
         document.getElementById('anim-bar-3d').classList.add('hidden');
-        this._setStatus('3D Berechnung startet…');
+        this._setStatus('3D computation starting…');
         this._showLog();
 
         const windSpeed  = parseFloat(document.getElementById('wind-speed-3d').value) || 20;
@@ -801,7 +845,7 @@ class CFDApp {
                      transient: transient3d, endTime: endTime3d, dt: dt3d };
         } else {
             const tc = this._tc3d || CASES_3D[0];
-            if (!tc) { this._setStatus('Kein 3D Modell geladen', 'error'); this._solving = false; return; }
+            if (!tc) { this._setStatus('No 3D model loaded', 'error'); this._solving = false; return; }
             body = { footprint: tc.polygon, height: tc.height || height,
                      windSpeed, windAngle, z0, domainFactor: domainMul, nIterations,
                      transient: transient3d, endTime: endTime3d, dt: dt3d };
@@ -814,7 +858,7 @@ class CFDApp {
         // Near-wall mesh size relative to the (effective) building height.
         // If the test case specifies an explicit meshSize, honour it (e.g. small-scale validation cases).
         const hEff = body.height ?? body.buildingHeight ?? height;
-        const tcMeshSize = (!this._glbUrl && this._tc3d?.meshSize) ? this._tc3d.meshSize : null;
+        const tcMeshSize = this._tc3d?.meshSize ?? null;
         body.meshSize = tcMeshSize ?? Math.max(hEff / meshFactor, 0.3);
 
         const endpoint = this._glbUrl ? '/api/cfd/solve3d-stl' : '/api/cfd/solve3d';
@@ -829,8 +873,8 @@ class CFDApp {
             if (!r.ok) throw new Error(await r.text());
             this._solveResult = await r.json();
         } catch (e) {
-            this._appendLog(`Fehler: ${e.message}`);
-            this._setStatus('Fehler', 'error');
+            this._appendLog(`Error: ${e.message}`);
+            this._setStatus('Error', 'error');
             this._solving = false;
             return;
         }
@@ -865,7 +909,7 @@ class CFDApp {
                             } else if (result.case_dir) {
                                 const fc = result.force_coefficients;
                                 if (fc) this._appendLog(`✓ cD=${(fc.Cd??fc.cd??0).toFixed(4)} cL=${(fc.Cl??fc.cl??0).toFixed(4)}`);
-                                else    this._appendLog('✓ 3D Berechnung abgeschlossen');
+                                else    this._appendLog('✓ 3D computation finished');
                             }
                         }
                     } catch (_) {}
@@ -897,19 +941,19 @@ class CFDApp {
     // ── results ───────────────────────────────────────────────────
 
     async _fetchResult() {
-        this._setStatus('Berechnung abgeschlossen', 'ok');
+        this._setStatus('Computation finished', 'ok');
         if (!this._solveResult) {
-            this._appendLog('⚠ Ergebnis-Daten nicht empfangen. Bitte erneut versuchen.');
+            this._appendLog('⚠ Result data not received. Please try again.');
             return;
         }
         // Solver failed but may have partial results (e.g. timeout mid-run).
         // Show a warning but continue to display whatever was written.
         if (this._solveResult.success === false || this._solveResult.error) {
-            const msg = this._solveResult.error || 'Berechnung fehlgeschlagen.';
+            const msg = this._solveResult.error || 'Computation failed.';
             this._appendLog('⚠ ' + msg);
             this._setStatus(msg, 'warning');
             if (!this._solveResult.field && !this._solveResult.case_dir) return;
-            this._appendLog('ℹ Teilergebnisse werden angezeigt.');
+            this._appendLog('ℹ Showing partial results.');
         }
         // 2D result: has field data inline
         if (this._solveResult.field) {
@@ -1000,7 +1044,7 @@ class CFDApp {
         const result = this._solveResult;
         if (!result?.field) return;
 
-        // "Ohne Hintergrund": skip CFD contour, show dark section fill instead
+        // "No background": skip CFD contour, show dark section fill instead
         let bounds;
         if (noBg) {
             this._viewer._clearCFD();
@@ -1025,11 +1069,11 @@ class CFDApp {
 
     _updateColorbar(fieldName, vmin, vmax) {
         const FIELDS = {
-            pressure: { label: 'Druck p',          unit: 'm²/s²' },
-            speed:    { label: 'Geschw. |U|',       unit: 'm/s'   },
+            pressure: { label: 'Pressure p',        unit: 'm²/s²' },
+            speed:    { label: 'Velocity |U|',      unit: 'm/s'   },
             vorticity:{ label: 'Vorticity ωz',      unit: '1/s'   },
-            turb_k:   { label: 'Turb.-energie k',   unit: 'm²/s²' },
-            mesh:     { label: 'Netz',               unit: ''      },
+            turb_k:   { label: 'Turb. energy k',    unit: 'm²/s²' },
+            mesh:     { label: 'Mesh',               unit: ''      },
         };
         const info = FIELDS[fieldName] ?? { label: fieldName, unit: '' };
 
@@ -1302,7 +1346,7 @@ class CFDApp {
   <!-- X-axis label -->
   <text x="${PAD.l + cw/2}" y="${SVG_H-2}" text-anchor="middle"
         font-size="7.5" font-family="Barlow Condensed,sans-serif" fill="#445566">
-        Konturlänge s [m]  (s=0 = Vorderkante)
+        Contour length s [m]  (s=0 = leading edge)
   </text>
 
   <!-- Cp label -->
@@ -1377,9 +1421,9 @@ class CFDApp {
         const zeit = this._lastExecTime != null ? `${this._lastExecTime.toFixed(1)} s` : '—';
 
         const parts = [];
-        if (nNodes !== '—') parts.push(`${Number(nNodes).toLocaleString('de')} Kn.`);
-        if (nCells !== '—') parts.push(`${Number(nCells).toLocaleString('de')} Zellen`);
-        if (dof    !== '—') parts.push(`${Number(dof).toLocaleString('de')} DOF`);
+        if (nNodes !== '—') parts.push(`${Number(nNodes).toLocaleString('en')} nodes`);
+        if (nCells !== '—') parts.push(`${Number(nCells).toLocaleString('en')} cells`);
+        if (dof    !== '—') parts.push(`${Number(dof).toLocaleString('en')} DOF`);
         parts.push(`t = ${zeit}`);
 
         const el = document.getElementById('statusbar-stats');
@@ -1423,7 +1467,7 @@ class CFDApp {
         this._update3DSlices();
         this._setup3DAnimation(result);
         if (result.force_history) this._renderForcePlot(result.force_history);
-        this._setStatus('3D Ergebnisse geladen', 'ok');
+        this._setStatus('3D results loaded', 'ok');
     }
 
     async _update3DSlices() {
@@ -1454,7 +1498,7 @@ class CFDApp {
         // Both failed → the case is gone or empty (e.g. /tmp cleared, server restarted,
         // or solve never finished). Tell the user instead of failing silently.
         if (!hzData && !vtData) {
-            this._setStatus('3D-Ergebnis nicht mehr verfügbar — bitte neu berechnen.', 'error');
+            this._setStatus('3D result no longer available — please recompute.', 'error');
             return;
         }
 
@@ -1540,7 +1584,7 @@ class CFDApp {
         // Fallback: fetch spaghetti streamlines from backend
         const zMinPct = parseInt(document.getElementById('sl3d-szmin').value) / 100;
         const zMaxPct = parseInt(document.getElementById('sl3d-szmax').value) / 100;
-        this._setStatus('Stromlinien werden berechnet…');
+        this._setStatus('Computing streamlines…');
         try {
             const res = await fetch(api('/api/cfd/streamlines3d'), {
                 method: 'POST',
@@ -1550,15 +1594,15 @@ class CFDApp {
             if (!res.ok) throw new Error(await res.text());
             const data = await res.json();
             this._viewer.show3DStreamlines(data.streamlines ?? []);
-            this._setStatus(`${data.count ?? 0} Stromlinien geladen`, 'ok');
+            this._setStatus(`${data.count ?? 0} streamlines loaded`, 'ok');
         } catch (e) {
-            this._setStatus('Stromlinien-Fehler: ' + e.message, 'error');
+            this._setStatus('Streamline error: ' + e.message, 'error');
         }
     }
 
     async _fetchSurfaceStreamlines() {
         if (!this._3dCaseDir) return;
-        this._setStatus('Oberflächenstromlinien werden berechnet…');
+        this._setStatus('Computing surface streamlines…');
         try {
             const res = await fetch(api('/api/cfd/surface-lines'), {
                 method: 'POST',
@@ -1576,9 +1620,9 @@ class CFDApp {
                 ofCenter = { x: 0, y: 0, z: H / 2 };
             }
             this._viewer.showSurfaceStreamlines(data.lines ?? [], ofCenter);
-            this._setStatus(`${data.count ?? 0} Oberflächenstromlinien geladen`, 'ok');
+            this._setStatus(`${data.count ?? 0} surface streamlines loaded`, 'ok');
         } catch (e) {
-            this._setStatus('Oberflächenstromlinien-Fehler: ' + e.message, 'error');
+            this._setStatus('Surface streamline error: ' + e.message, 'error');
         }
     }
 
@@ -1591,7 +1635,7 @@ class CFDApp {
         // Upstream distance ≈ f * H; convective time = upstreamDist / windSpeed
         const tConv = (f * h) / v;
         const tRec = Math.ceil(tConv * 2);
-        hint.textContent = `Empfehlung: ≥ ${tRec} s (${Math.round(tConv)} s Konvektionszeit × 2)`;
+        hint.textContent = `Recommendation: ≥ ${tRec} s (${Math.round(tConv)} s convection time × 2)`;
         if (autoSet) {
             const input = document.getElementById('end-time-3d');
             if (input && parseFloat(input.value) < tRec) input.value = tRec;
@@ -1684,7 +1728,7 @@ class CFDApp {
                             }
                             loaded++;
                             const pct = Math.round(loaded / n * (slActive ? 50 : 100));
-                            document.getElementById('anim-time').textContent = `Laden ${pct}%`;
+                            document.getElementById('anim-time').textContent = `Loading ${pct}%`;
                         })
                         .catch(() => { loaded++; })
                 );
@@ -1708,7 +1752,7 @@ class CFDApp {
                     rawData[j] = null; // free memory as we go
                 }
                 const pct = 50 + Math.round((j + 1) / n * 50);
-                document.getElementById('anim-time').textContent = `Stromlinien ${pct}%`;
+                document.getElementById('anim-time').textContent = `Streamlines ${pct}%`;
             }
         }
 
@@ -1876,7 +1920,7 @@ class CFDApp {
                     this._anim3dCache[j] = { hz, vt };
                     loaded++;
                     document.getElementById('anim3d-time').textContent =
-                        `Laden ${Math.round(loaded / n * 100)}%`;
+                        `Loading ${Math.round(loaded / n * 100)}%`;
                 }));
             }
             await Promise.all(batch);
@@ -2073,7 +2117,7 @@ try {
 } catch (e) {
     console.error('CFDApp init failed:', e);
     const sb = document.getElementById('statusbar-msg');
-    if (sb) { sb.textContent = 'Init-Fehler: ' + e.message; sb.style.color = 'var(--danger)'; }
+    if (sb) { sb.textContent = 'Init error: ' + e.message; sb.style.color = 'var(--danger)'; }
 }
 
 export { CFDApp };

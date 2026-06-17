@@ -448,11 +448,11 @@ export class Draw2D {
         }
         const msg = !this.closed
             ? (this.pts.length === 0
-                ? 'Klicken = Punkt setzen  ·  Scroll = Zoom  ·  Mitteltaste = Pan'
+                ? 'Click = add point  ·  Scroll = zoom  ·  Middle button = pan'
                 : this.pts.length < 3
-                ? `${this.pts.length} Punkt${this.pts.length > 1 ? 'e' : ''}  ·  Rechtsklick = letzten löschen  ·  Esc = abbrechen`
-                : 'Doppelklick oder ersten Punkt anklicken zum Schließen')
-            : 'Polygon geschlossen  ·  Punkte ziehen zum Anpassen  ·  Rechtsklick = Punkt löschen';
+                ? `${this.pts.length} point${this.pts.length > 1 ? 's' : ''}  ·  Right-click = delete last  ·  Esc = cancel`
+                : 'Double-click or click the first point to close')
+            : 'Polygon closed  ·  drag points to adjust  ·  Right-click = delete point';
         html += `<text x="${w / 2}" y="${h - 10}" text-anchor="middle" font-size="11" font-family="Barlow Condensed,sans-serif" fill="#3a4a5a">${msg}</text>`;
         this._layers.hint.innerHTML = html;
     }
