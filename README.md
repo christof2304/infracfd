@@ -5,7 +5,7 @@
 **2D** — cross-section aerodynamics (bridge decks, building profiles)  
 **3D** — building aerodynamics (single buildings or entire city blocks)
 
-Draw a geometry in the browser, hit run, get pressure fields, velocity slices and streamlines — no pre-processing scripts, no local CFD installation beyond OpenFOAM in WSL.
+Draw a geometry in the browser, hit run, get pressure fields, velocity slices and streamlines — no pre-processing scripts, no local CFD installation beyond OpenFOAM (Linux or WSL).
 
 > By [geobim.app](https://geobim.app)  
 > Cross-sections and 3D geometries derived from the [SOFiSTiK Dolfyn](https://www.sofistik.com) CFD example library.
@@ -19,22 +19,23 @@ Draw a geometry in the browser, hit run, get pressure fields, velocity slices an
 | Frontend | Vanilla JS, Three.js (no framework) |
 | Backend | Python, FastAPI |
 | Meshing | Gmsh (Python API) |
-| Solver | OpenFOAM 2406/2412 via WSL (steady RANS, k-ε) |
+| Solver | OpenFOAM 2412 (Linux or WSL) — steady/transient RANS; selectable k-ε, RNG k-ε, realizable k-ε, k-ω SST |
 
 ---
 
 ## Requirements
 
 - Python 3.10+
-- WSL (Ubuntu) with OpenFOAM 2406 or 2412
+- Linux (or WSL/Ubuntu) with OpenFOAM 2412 (`simpleFoam`, `pimpleFoam`, `snappyHexMesh`, `gmshToFoam` on PATH)
 - Gmsh (`pip install gmsh`)
-- scipy, numpy
+- scipy, numpy, trimesh
 
-**Install OpenFOAM in WSL:**
+**Install OpenFOAM (Ubuntu/WSL):**
 ```bash
-# In WSL Ubuntu
 sudo sh -c "wget -q -O - https://dl.openfoam.com/add-debian-repo.sh | bash"
-sudo apt install openfoam2406-default
+sudo apt install openfoam2412-default
+# then source it (add to ~/.bashrc):
+source /usr/lib/openfoam/openfoam2412/etc/bashrc
 ```
 
 ---
@@ -42,8 +43,8 @@ sudo apt install openfoam2406-default
 ## Quickstart
 
 ```bash
-git clone https://github.com/christof2304/infrafem-cfd.git
-cd infrafem-cfd
+git clone https://github.com/christof2304/infracfd.git
+cd infracfd
 pip install -r requirements.txt
 pip install gmsh
 ```
@@ -67,7 +68,7 @@ Then open **http://localhost:8000/cfd/**
 ### 2D Cross-Section
 - Draw any polygon directly in the browser
 - Automatic Gmsh mesh with boundary layer refinement
-- Steady RANS or transient solve
+- Steady RANS or transient solve, selectable turbulence model (k-ε, RNG k-ε, realizable k-ε, k-ω SST)
 - Pressure, velocity, vorticity, turbulent kinetic energy
 - Client-side RK4 streamlines
 - Force coefficients Cd / Cl
@@ -84,6 +85,23 @@ Then open **http://localhost:8000/cfd/**
 - Wind angle, terrain roughness (z₀) and domain size configurable
 - Live solver log stream (Server-Sent Events)
 - Three.js 3D viewer with isometric OrthographicCamera
+
+---
+
+## Validation
+
+infraCFD's OpenFOAM pipeline has been cross-checked against published benchmarks
+and the SOFiSTiK/Dolfyn example library, using identical input parameters.
+
+| Case | Quantity | infraCFD | Reference | Source |
+|---|---|---|---|---|
+| **DFG cylinder, Re=20** (laminar) | c_d / c_l / Δp | 5.580 / 0.0108 / 0.1155 | 5.5795 / 0.0106 / 0.1172 | Schäfer & Turek 1996 |
+| **RUB bridge deck**, α=4° (k-ω SST) | c_d / c_l / c_m | 0.098 / 0.358 / 0.118 | 0.095 / 0.380 / 0.109 | wind tunnel (rub_bridge.dat) |
+
+The DFG laminar benchmark is reproduced essentially exactly; the RUB deck matches
+the wind tunnel within a few percent. Note that the standard **k-ε** model severely
+under-predicts bridge-deck lift — **k-ω SST** is required (and is selectable in the
+UI). See the case notes in `cfd-testcases.js`.
 
 ---
 
@@ -111,6 +129,14 @@ three/          Three.js (bundled, no npm required)
 
 ## License
 
-MIT — see [LICENSE](LICENSE)
+**GPLv3** — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
-> **Note on dependencies:** Gmsh (used for meshing) is GPL-licensed and OpenFOAM is GPL-licensed. Both are invoked as external tools/processes, not embedded. The infraCFD source code itself is MIT.
+infraCFD uses the **Gmsh Python API** (`import gmsh`) for mesh generation. Gmsh is
+GPL-licensed, and linking against its API makes the combined work subject to the
+GPL — so infraCFD is released under **GPLv3**, which is compatible with both Gmsh
+(GPLv2+) and OpenFOAM (GPLv3). OpenFOAM itself is invoked as a separate external
+program (subprocess).
+
+Dependencies are **not** redistributed — install them separately (see Requirements).
+Third-party components and example-data licenses (Three.js MIT, CesiumMan CC-BY 4.0,
+SOFiSTiK/Dolfyn-derived test cases, DFG benchmark) are listed in [NOTICE](NOTICE).

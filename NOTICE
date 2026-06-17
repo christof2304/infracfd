@@ -1,0 +1,50 @@
+infraCFD — browser-based wind analysis for civil-engineering structures
+Copyright (C) 2025–2026 Christof Lorenz / geobim.app
+
+This program is free software: you can redistribute it and/or modify it
+under the terms of the GNU General Public License as published by the Free
+Software Foundation, either version 3 of the License, or (at your option)
+any later version. See the LICENSE file for the full text.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE.
+
+-------------------------------------------------------------------------------
+Why GPLv3
+-------------------------------------------------------------------------------
+infraCFD uses the Gmsh Python API (`import gmsh`) for mesh generation. Gmsh is
+licensed under the GNU GPL (v2 or later), and linking against its API makes the
+combined work subject to the GPL. GPLv3 is compatible with both Gmsh and
+OpenFOAM (GPLv3), so infraCFD is released under GPLv3.
+
+(OpenFOAM is invoked as a separate external program via subprocess, which is
+arm's-length use; the GPL obligation on infraCFD itself stems primarily from the
+Gmsh Python binding.)
+
+-------------------------------------------------------------------------------
+Third-party components
+-------------------------------------------------------------------------------
+- OpenFOAM (solver, external)        — GPLv3        — https://www.openfoam.com
+- Gmsh (meshing, Python API)         — GPLv2+       — https://gmsh.info
+- Three.js (3D viewer)               — MIT          — https://threejs.org
+- FastAPI / Starlette / uvicorn      — MIT / BSD    — backend
+- trimesh                            — MIT          — GLB/STL handling
+- NumPy, SciPy                       — BSD          — numerics
+
+These dependencies are NOT redistributed with infraCFD; install them separately
+(see README).
+
+-------------------------------------------------------------------------------
+Example data & models
+-------------------------------------------------------------------------------
+- 2D/3D test cases (cfd-testcases.js): cross-section and building geometries
+  derived from the SOFiSTiK "Dolfyn" CFD example library
+  (https://www.sofistik.com). Reference coefficient values are quoted from the
+  respective published benchmarks / wind-tunnel data for validation only.
+- DFG benchmark (Schäfer & Turek, 1996): laminar cylinder-in-channel reference.
+- CesiumMan example model: © Cesium GS, Inc., licensed CC-BY 4.0
+  (https://github.com/CesiumGS/cesium). Included only as a demo GLB.
+
+Do not redistribute third-party example geometries or models without verifying
+their respective licenses.
