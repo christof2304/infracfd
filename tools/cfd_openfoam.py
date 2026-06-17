@@ -943,7 +943,7 @@ gmsh.finalize()
 """
     result = subprocess.run(
         [sys.executable, "-c", script],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     if "MSH_OK" not in result.stdout:
         raise RuntimeError(f"Gmsh export failed: {result.stderr[:500]}")
