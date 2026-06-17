@@ -45,6 +45,7 @@ def _run_of_script(script_path, case_dir, timeout=600):
 
 def create_openfoam_case(mesh_result, wind_speed=20.0, wind_angle=0.0,
                          nu=1.5e-5, turbulence_intensity=0.05,
+                         turbulence_model='kEpsilon', turbulence_length_scale=None,
                          output_dir=None, transient=False, end_time=5.0, dt=0.001,
                          write_interval=100, grounded=None):
     """
@@ -77,15 +78,28 @@ def create_openfoam_case(mesh_result, wind_speed=20.0, wind_angle=0.0,
     Ux = wind_speed * math.cos(rad)
     Uy = wind_speed * math.sin(rad)
 
-    # Turbulence parameters (k-epsilon)
+    # Turbulence model + inlet turbulence.
+    # tvar = second turbulence field: "epsilon" (k-epsilon family) or "omega" (k-omega SST).
+    # turbulence_length_scale lets callers match a reference inflow length scale (e.g.
+    # SOFiSTiK/Dolfyn EPS 20mm); default keeps the historical 0.1*char_dim (k-epsilon
+    # results stay bit-identical).
+    Cmu = 0.09
     char_dim = mesh_result["stats"]["char_dim"]
+    L_turb = turbulence_length_scale or (0.1 * char_dim)
     k_inlet = 1.5 * (wind_speed * turbulence_intensity) ** 2
-    epsilon_inlet = 0.09 * k_inlet ** 1.5 / (0.1 * char_dim)
-    nut_inlet = 0.09 * k_inlet ** 2 / max(epsilon_inlet, 1e-10)
+    sst = turbulence_model in ("kOmegaSST", "kOmega")
+    if sst:
+        tvar, tvar_dims, tvar_wallfn = "omega", "[0 0 -1 0 0 0 0]", "omegaWallFunction"
+        tvar_inlet = math.sqrt(k_inlet) / (Cmu ** 0.25 * L_turb)
+        nut_inlet = k_inlet / max(tvar_inlet, 1e-10)
+    else:
+        tvar, tvar_dims, tvar_wallfn = "epsilon", "[0 2 -3 0 0 0 0]", "epsilonWallFunction"
+        tvar_inlet = Cmu * k_inlet ** 1.5 / L_turb
+        nut_inlet = Cmu * k_inlet ** 2 / max(tvar_inlet, 1e-10)
 
     # Reynolds number
     Re = wind_speed * char_dim / nu
-    print(f"  Re = {Re:.0f}, k = {k_inlet:.4f}, epsilon = {epsilon_inlet:.4f}")
+    print(f"  Re = {Re:.0f}, model = {turbulence_model}, k = {k_inlet:.4f}, {tvar} = {tvar_inlet:.4f}")
 
     # ── Create directory structure ──
     for d in ["0", "constant", "system", "constant/polyMesh"]:
@@ -136,16 +150,16 @@ boundaryField
     defaultFaces {{ type empty; }}
 }}
 """)
-        _write_of_file(case_dir / "0" / "epsilon", "volScalarField", "epsilon", f"""
-dimensions      [0 2 -3 0 0 0 0];
-internalField   uniform {epsilon_inlet};
+        _write_of_file(case_dir / "0" / tvar, "volScalarField", tvar, f"""
+dimensions      {tvar_dims};
+internalField   uniform {tvar_inlet};
 boundaryField
 {{
-    inlet   {{ type fixedValue; value uniform {epsilon_inlet}; }}
-    outlet  {{ type inletOutlet; inletValue uniform {epsilon_inlet}; value uniform {epsilon_inlet}; }}
+    inlet   {{ type fixedValue; value uniform {tvar_inlet}; }}
+    outlet  {{ type inletOutlet; inletValue uniform {tvar_inlet}; value uniform {tvar_inlet}; }}
     top     {{ type zeroGradient; }}
-    ground  {{ type epsilonWallFunction; value uniform {epsilon_inlet}; }}
-    section {{ type epsilonWallFunction; value uniform {epsilon_inlet}; }}
+    ground  {{ type {tvar_wallfn}; value uniform {tvar_inlet}; }}
+    section {{ type {tvar_wallfn}; value uniform {tvar_inlet}; }}
     defaultFaces {{ type empty; }}
 }}
 """)
@@ -230,21 +244,21 @@ boundaryField
 }}
 """)
 
-      # epsilon (turbulent dissipation)
-      _write_of_file(case_dir / "0" / "epsilon", "volScalarField", "epsilon", f"""
-dimensions      [0 2 -3 0 0 0 0];
-internalField   uniform {epsilon_inlet};
+      # epsilon / omega (second turbulence field)
+      _write_of_file(case_dir / "0" / tvar, "volScalarField", tvar, f"""
+dimensions      {tvar_dims};
+internalField   uniform {tvar_inlet};
 boundaryField
 {{
     farfield
     {{
         type            freestream;
-        freestreamValue uniform {epsilon_inlet};
+        freestreamValue uniform {tvar_inlet};
     }}
     section
     {{
-        type            epsilonWallFunction;
-        value           uniform {epsilon_inlet};
+        type            {tvar_wallfn};
+        value           uniform {tvar_inlet};
     }}
     defaultFaces
     {{
@@ -301,7 +315,7 @@ FoamFile
 simulationType  RAS;
 RAS
 {{
-    RASModel        kEpsilon;
+    RASModel        {turbulence_model};
     turbulence      on;
     printCoeffs     on;
 }}
@@ -332,9 +346,13 @@ RAS
     else:
         solver_app = "simpleFoam"
         delta_t = 1
-        end_t = 500
+        # k-omega SST lift/moment on bluff bodies need ~1500+ iterations to plateau,
+        # whereas k-epsilon-family runs converge (and early-stop via residualControl)
+        # well within 500. Raise the cap only for SST so existing k-epsilon runtimes
+        # and results stay unchanged; residualControl still stops converged cases early.
+        end_t = 2000 if sst else 500
         write_ctrl = "timeStep"
-        write_int = 500
+        write_int = end_t
         purge = 1
         adjust_block = "adjustTimeStep  no;"
 
@@ -375,8 +393,8 @@ functions
         rho             rhoInf;
         rhoInf          1.225;
         CofR            (0 0 0);
-        liftDir         (0 1 0);
-        dragDir         (1 0 0);
+        liftDir         ({-math.sin(rad)} {math.cos(rad)} 0);
+        dragDir         ({math.cos(rad)} {math.sin(rad)} 0);
         pitchAxis       (0 0 1);
         magUInf         {wind_speed};
         lRef            {char_dim};
@@ -401,16 +419,17 @@ divSchemes
     default             none;
     div(phi,U)          bounded Gauss linearUpwind grad(U);
     div(phi,k)          bounded Gauss upwind;
-    div(phi,epsilon)    bounded Gauss upwind;
+    div(phi,{tvar})    bounded Gauss upwind;
     div((nuEff*dev2(T(grad(U))))) Gauss linear;
 }}
 laplacianSchemes {{ default Gauss linear corrected; }}
 interpolationSchemes {{ default linear; }}
 snGradSchemes {{ default corrected; }}
+wallDist {{ method meshWave; }}
 """)
 
     if transient:
-        _write_of_file(case_dir / "system" / "fvSolution", None, None, """
+        _write_of_file(case_dir / "system" / "fvSolution", None, None, ("""
 FoamFile
 {
     version     2.0;
@@ -442,9 +461,9 @@ relaxationFactors
 {
     equations { ".*" 1; }
 }
-""")
+""").replace("epsilon", tvar))
     else:
-        _write_of_file(case_dir / "system" / "fvSolution", None, None, """
+        _write_of_file(case_dir / "system" / "fvSolution", None, None, ("""
 FoamFile
 {
     version     2.0;
@@ -472,7 +491,7 @@ relaxationFactors
     fields { p 0.3; }
     equations { U 0.7; k 0.7; epsilon 0.7; }
 }
-""")
+""").replace("epsilon", tvar))
 
     # ── Save mesh data for Gmsh → OpenFOAM conversion ──
     with open(case_dir / "mesh_data.json", "w") as f:
@@ -486,7 +505,8 @@ relaxationFactors
         "char_dim": char_dim,
         "nu": nu,
         "k_inlet": k_inlet,
-        "epsilon_inlet": epsilon_inlet,
+        "turbulence_model": turbulence_model,
+        f"{tvar}_inlet": tvar_inlet,
     }
     with open(case_dir / "case_meta.json", "w") as f:
         json.dump(meta, f, indent=2)
@@ -931,7 +951,8 @@ gmsh.finalize()
 
 def run_openfoam(case_dir, polygon, mesh_size=0.2, far_field_factor=15,
                  bl_layers=5, bl_ratio=1.3, n_procs=1, timeout=None,
-                 structured=False, wind_speed=20.0, grounded=False):
+                 structured=False, wind_speed=20.0, grounded=False,
+                 turbulence_model='kEpsilon'):
     """
     Run OpenFOAM simpleFoam via WSL.
 
@@ -990,6 +1011,8 @@ method          scotch;
     # A steady-only fvSolution (SIMPLE block, no *Final solvers / no PIMPLE dict) makes
     # pimpleFoam abort with "Entry 'UFinal' not found", so branch on the actual solver.
     if structured or grounded:
+        # Second turbulence field name must match the model written by create_openfoam_case.
+        tvar = "omega" if turbulence_model in ("kOmegaSST", "kOmega") else "epsilon"
         ddt_scheme = "Euler" if is_transient else "steadyState"
         _write_of_file(case_dir / "system" / "fvSchemes", None, None, f"""
 FoamFile
@@ -1006,12 +1029,13 @@ divSchemes
     default             none;
     div(phi,U)          bounded Gauss linearUpwind grad(U);
     div(phi,k)          bounded Gauss upwind;
-    div(phi,epsilon)    bounded Gauss upwind;
+    div(phi,{tvar})    bounded Gauss upwind;
     div((nuEff*dev2(T(grad(U))))) Gauss linear;
 }}
 laplacianSchemes {{ default Gauss linear limited 0.5; }}
 interpolationSchemes {{ default skewCorrected linear; }}
 snGradSchemes {{ default limited 0.5; }}
+wallDist {{ method meshWave; }}
 """)
         if is_transient:
             # Transient "robust PIMPLE" on the skewed O-grid: keep the robust
@@ -1025,7 +1049,7 @@ snGradSchemes {{ default limited 0.5; }}
             # loop is iterated to convergence (outerCorrectorResidualControl), the
             # under-relaxation does NOT cost time accuracy — only the within-step
             # path to the converged state is damped.
-            _write_of_file(case_dir / "system" / "fvSolution", None, None, """
+            _write_of_file(case_dir / "system" / "fvSolution", None, None, ("""
 FoamFile
 {
     version     2.0;
@@ -1058,9 +1082,9 @@ relaxationFactors
     fields    { p 0.3; }
     equations { U 0.7; "(k|epsilon)" 0.7; }
 }
-""")
+""").replace("epsilon", tvar))
         else:
-            _write_of_file(case_dir / "system" / "fvSolution", None, None, """
+            _write_of_file(case_dir / "system" / "fvSolution", None, None, ("""
 FoamFile
 {
     version     2.0;
@@ -1089,7 +1113,7 @@ relaxationFactors
     fields    { p 0.1; }
     equations { U 0.3; k 0.3; epsilon 0.3; }
 }
-""")
+""").replace("epsilon", tvar))
 
     of_case = _of_path(case_dir)
 

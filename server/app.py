@@ -167,6 +167,18 @@ def cfd_solve(body: dict):
     structured = body.get("structured", False)
     grounded   = body.get("grounded", False)
 
+    # Turbulence + parity parameters (defaults preserve historical behaviour).
+    # turbulence_model is interpolated into the worker script, so restrict it to a
+    # known whitelist to avoid code injection.
+    _ALLOWED_TURB = {"kEpsilon", "realizableKE", "RNGkEpsilon", "kOmegaSST", "kOmega"}
+    turbulence_model = body.get("turbulenceModel", "kEpsilon")
+    if turbulence_model not in _ALLOWED_TURB:
+        turbulence_model = "kEpsilon"
+    turb_length    = body.get("turbulenceLengthScale", None)
+    turb_length    = None if turb_length is None else float(turb_length)
+    turb_intensity = float(body.get("turbulenceIntensity", 0.05))
+    nu             = float(body.get("nu", 1.5e-5))
+
     import tempfile
     case_dir = tempfile.mkdtemp(prefix="cfd_")
 
@@ -187,12 +199,14 @@ try:
     mesh = generate_cfd_mesh(polygon, mesh_size={mesh_size}, far_field_factor={far_field},
         wind_speed={wind_speed}, structured={structured}, grounded={grounded})
     case = create_openfoam_case(mesh, wind_speed={wind_speed}, wind_angle={wind_angle},
+        nu={nu}, turbulence_intensity={turb_intensity},
+        turbulence_model={turbulence_model!r}, turbulence_length_scale={turb_length!r},
         output_dir=r'{case_dir}', transient={transient}, end_time={end_time}, dt={dt},
         grounded={grounded})
     result = run_openfoam(case, polygon, mesh_size={mesh_size}, far_field_factor={far_field},
         bl_layers={bl_layers}, bl_ratio={bl_ratio},
         structured={structured}, wind_speed={wind_speed}, n_procs={4 if transient else 1},
-        grounded={grounded})
+        grounded={grounded}, turbulence_model={turbulence_model!r})
     result["stats"]    = mesh["stats"]
     result["case_dir"] = r'{case_dir}'
     field_data = parse_cfd_results(r'{case_dir}', section_polygon=polygon)

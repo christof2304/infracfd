@@ -546,8 +546,11 @@ def generate_cfd_mesh(polygon, wind_angle=0, mesh_size=0.5, far_field_factor=15,
     dist_field = gmsh.model.mesh.field.add("Distance")
     gmsh.model.mesh.field.setNumbers(dist_field, "CurvesList", section_lines)
 
-    # Smooth transition: bl_outer → mesh_size → ff_mesh_size
-    near_size = max(bl_outer * 2.5, mesh_size * 0.4)
+    # Near-body background size. Tie this to mesh_size so the preview actually
+    # refines with the density slider (track the solver-mesh resolution) instead of
+    # saturating. Floor at the outer BL cell so the first bulk triangle is not finer
+    # than the boundary-layer it sits on (avoids inverted sizing at sharp corners).
+    near_size = max(mesh_size * 0.5, first_layer)
 
     thresh = gmsh.model.mesh.field.add("Threshold")
     gmsh.model.mesh.field.setNumber(thresh, "InField",  dist_field)
