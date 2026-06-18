@@ -611,7 +611,7 @@ select.p-input option { background: var(--bg-panel); }
 <header id="header">
     <div class="app-logo">infra<strong>CFD</strong> <span>by geobim.app</span></div>
     <button class="tab-btn active" data-tab="2d">2D Cross-section</button>
-    <button class="tab-btn" data-tab="3d">3D Building</button>
+    <button class="tab-btn" data-tab="3d" title="Experimental — the tested v0.1 scope is 2D steady">3D Building <sup style="font-size:8px;opacity:.65">beta</sup></button>
     <div class="hdr-spacer"></div>
     <span id="hdr-status"></span>
     <div class="view-toggle" id="view-toggle">
@@ -766,7 +766,7 @@ select.p-input option { background: var(--bg-panel); }
             </div>
             <div class="p-checkbox-row">
                 <input type="checkbox" id="transient">
-                <label for="transient">Transient (vortex shedding)</label>
+                <label for="transient" title="Experimental — v0.1 is validated for steady solving only">Transient (vortex shedding) <sup style="font-size:8px;opacity:.65">beta</sup></label>
             </div>
             <div id="transient-opts" style="display:none" class="p-sub">
                 <div class="p-row">
@@ -902,7 +902,7 @@ select.p-input option { background: var(--bg-panel); }
             <div class="p-label">Simulation</div>
             <div class="p-checkbox-row">
                 <input type="checkbox" id="transient-3d">
-                <label for="transient-3d">Transient (pimpleFoam)</label>
+                <label for="transient-3d" title="Experimental — v0.1 is validated for steady solving only">Transient (pimpleFoam) <sup style="font-size:8px;opacity:.65">beta</sup></label>
             </div>
             <div id="transient-opts-3d" style="display:none" class="p-sub">
                 <div class="p-row">

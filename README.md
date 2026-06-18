@@ -3,12 +3,26 @@
 **[infracfd.app](https://infracfd.app)** — browser-based wind analysis for civil engineering structures, powered by OpenFOAM.
 
 **2D** — cross-section aerodynamics (bridge decks, building profiles)  
-**3D** — building aerodynamics (single buildings or entire city blocks)
+**3D** — building aerodynamics (single buildings or entire city blocks) *(experimental)*
 
 Draw a geometry in the browser, hit run, get pressure fields, velocity slices and streamlines — no pre-processing scripts, no local CFD installation beyond OpenFOAM (Linux or WSL).
 
 > By [geobim.app](https://geobim.app)  
 > Cross-sections and 3D geometries derived from the [SOFiSTiK Dolfyn](https://www.sofistik.com) CFD example library.
+
+### Status — v0.1.0
+
+This first release focuses on the tested, supported path: **2D cross-section
+aerodynamics, steady RANS.** All 19 built-in 2D cases run end-to-end and the
+solver is validated against published benchmarks (see [Validation](#validation)).
+
+**Experimental / roadmap** (present in the UI, marked *beta*, maturing in later
+releases): **3D building CFD** (snappyHexMesh) and **transient solving**
+(pimpleFoam / vortex shedding). Use with care — not yet benchmark-validated.
+
+> Note: the **NACA airfoil** cases run but their drag (cd) is unreliable with the
+> k-ε model at high Re — treat them as lift/flow demos, not cd validation. Bluff,
+> separating bodies need **k-ω SST** (selectable in the UI) for trustworthy lift.
 
 ---
 
@@ -73,7 +87,7 @@ Then open **http://localhost:8000/cfd/**
 - Client-side RK4 streamlines
 - Force coefficients Cd / Cl
 
-### 3D Building
+### 3D Building *(experimental — roadmap)*
 - Footprint-based building extrusion
 - Multi-building city block support
 - Atmospheric boundary layer inlet (z₀-dependent log profile)

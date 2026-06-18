@@ -256,21 +256,6 @@ export const CFD_TEST_CASES = [
         expected: { cD: "~1.0-1.3", cL: "~0", cM: "Dolfyn ref" },
     },
 
-    // ── GLB model library (3D, snappyHexMesh) ───────────────
-    {
-        name: "Human (CesiumMan, GLB)",
-        desc: "Pedestrian-wind demo, ~1.5 m figure — GLB model via snappyHexMesh (suitability verified).",
-        mode: '3d',
-        glb: '/uploads/cesiumman.glb',
-        glbScale: 1.0,
-        glbBounds: { min: [-0.569, -0.181, 0.0], max: [0.569, 0.131, 1.507] },  // 90° CW about the vertical axis
-        height: 1.5,
-        z0: 0.05,
-        windSpeed: 5,
-        meshSize: 0.06,   // 1.5 m figure — the default H/factor (ground 0.3 m) would be too coarse
-        expected: { cD: "~0.25 (Demo)", cL: "~0", cM: "~0" },
-    },
-
     // ── Multi-building urban district ─────────────────────────────
     {
         name: "Urban district (5 buildings)",
