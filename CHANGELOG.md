@@ -1,5 +1,15 @@
 # Changelog
 
+## Planned — v0.2
+
+- **Mesh preview ↔ solver consistency:** the UI mesh preview and the solver
+  currently use two independent generators with different boundary-layer settings
+  (preview shows ~more BL layers than the solver uses). Goal: *what you preview is
+  what gets solved* — unify the BL parametrization (and optionally show mesh edges
+  in the result view so the boundary layer is visible).
+- k-ω SST sweep of the 2D cases at their reference angles → more validated examples.
+- Take 3D building CFD and transient solving out of *beta*.
+
 ## v0.1.0 — first public release
 
 First open-source release. Scope: **2D cross-section aerodynamics, steady RANS.**
