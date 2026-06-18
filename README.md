@@ -26,6 +26,23 @@ releases): **3D building CFD** (snappyHexMesh) and **transient solving**
 
 ---
 
+## Gallery
+
+*Harbour Bridge deck — 2D cross-section, steady RANS (k-ε).*
+
+<table>
+<tr>
+<td align="center"><img src="docs/img/harbour_mesh.png" width="100%"><br><sub>Automatic mesh (Gmsh)</sub></td>
+<td align="center"><img src="docs/img/harbour_pressure.png" width="100%"><br><sub>Pressure</sub></td>
+</tr>
+<tr>
+<td align="center"><img src="docs/img/harbour_velocity.png" width="100%"><br><sub>Velocity |U|</sub></td>
+<td align="center"><img src="docs/img/harbour_turbulence.png" width="100%"><br><sub>Turbulent kinetic energy k</sub></td>
+</tr>
+</table>
+
+---
+
 ## Stack
 
 | Layer | Technology |
