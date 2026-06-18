@@ -8,6 +8,7 @@
 Draw a geometry in the browser, hit run, get pressure fields, velocity slices and streamlines — no pre-processing scripts, no local CFD installation beyond OpenFOAM (Linux or WSL).
 
 > By [geobim.app](https://geobim.app)  
+> The live app at [infracfd.app](https://infracfd.app) is **password-protected** to limit CFD load — **self-host** it (see [Requirements](#requirements)) or request access.  
 > Cross-sections and 3D geometries derived from the [SOFiSTiK Dolfyn](https://www.sofistik.com) CFD example library.
 
 ### Status — v0.1.0
