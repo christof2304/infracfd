@@ -812,15 +812,10 @@ def generate_gmsh_msh(polygon, msh_path, mesh_size=0.2, far_field_factor=15,
     script = f"""
 import sys, json
 sys.path.insert(0, r'{str(Path(__file__).resolve().parent.parent)}')
-from tools.cfd_mesh import generate_cfd_mesh
+from tools.cfd_mesh import boundary_layer_params
 import gmsh
 
-# Generate the mesh (this also initializes gmsh)
 polygon = {json.dumps(polygon)}
-generate_cfd_mesh(polygon, mesh_size={mesh_size}, far_field_factor={far_field_factor})
-
-# Gmsh is finalized in generate_cfd_mesh, re-init to export
-# Actually, let's do it differently: generate mesh and save .msh directly
 
 gmsh.initialize()
 gmsh.option.setNumber("General.Verbosity", 0)
@@ -892,8 +887,12 @@ gmsh.option.setNumber("Mesh.MeshSizeFromCurvature",      0)
 gmsh.option.setNumber("Mesh.Smoothing",                  5)
 
 # Boundary Layer: tuned for k-epsilon wall functions (y+ 30-100)
+# first_layer comes from the shared single-source-of-truth sizing so the
+# solved mesh matches the UI preview (tools/cfd_mesh.py:boundary_layer_params).
 if {bl_layers} > 0:
-    first_layer = max(2e-4, min({mesh_size} * 0.04, char_dim * 0.004))
+    first_layer, _bl_n, _bl_r, _bl_outer = boundary_layer_params(
+        char_dim, {mesh_size}, wind_speed={wind_speed},
+        bl_layers={bl_layers}, bl_ratio={bl_ratio})
     bl = gmsh.model.mesh.field.add("BoundaryLayer")
     gmsh.model.mesh.field.setNumbers(bl, "CurvesList",       slines)
     gmsh.model.mesh.field.setNumbers(bl, "PointsList",       spts)

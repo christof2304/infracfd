@@ -16,6 +16,49 @@ import os
 import tempfile
 
 
+# ── Boundary-layer sizing — single source of truth ─────────────────────────────
+
+def boundary_layer_params(char_dim, mesh_size, wind_speed=None, nu=1.5e-5,
+                          bl_layers=4, bl_ratio=1.4):
+    """Compute boundary-layer (inflation) sizing for the cross-section wall.
+
+    This is the SINGLE source of truth shared by both the UI preview mesh
+    (``generate_cfd_mesh``) and the solver mesh (``generate_gmsh_msh`` in
+    ``cfd_openfoam.py``), so that *what you preview is what gets solved*. Both
+    paths must route their first-layer height / layer count / growth ratio
+    through here — never inline the formula again.
+
+    Args:
+        char_dim:   characteristic section size max(width, height) [m]
+        mesh_size:  target bulk element size [m] (UI density slider)
+        wind_speed: free-stream speed [m/s]; accepted for the planned y+=50
+                    variant but NOT yet used (see note below)
+        nu:         kinematic viscosity [m^2/s]; reserved like wind_speed
+        bl_layers:  number of inflation layers (UI control); None -> default 4
+        bl_ratio:   geometric growth ratio between layers
+
+    Returns:
+        (first_layer, bl_layers, bl_ratio, bl_outer)
+            first_layer  first wall-normal cell height [m]
+            bl_layers    resolved layer count
+            bl_ratio     growth ratio (passed through unchanged)
+            bl_outer     outermost BL cell height [m]
+
+    Sizing reproduces the historical solver mesh exactly: a geometric first
+    layer tuned for k-epsilon wall functions (y+ ~ 30-100), independent of
+    wind speed. The physics-based y+=50 first layer
+    (``max(5e-6, 50*nu/u_tau)`` with ``u_tau = U*sqrt(Cf/2)``,
+    ``Cf = 0.074*Re**-0.2``) is the planned v0.2-step-2 upgrade and must be
+    introduced here behind a re-validation of the DFG cylinder and RUB
+    bridge-deck benchmarks.
+    """
+    if bl_layers is None:
+        bl_layers = 4
+    first_layer = max(2e-4, min(mesh_size * 0.04, char_dim * 0.004))
+    bl_outer = first_layer * bl_ratio ** bl_layers
+    return first_layer, bl_layers, bl_ratio, bl_outer
+
+
 # ── Structured O-mesh helpers ──────────────────────────────────────────────────
 
 def _cosine_resample(pts, n):
@@ -433,7 +476,7 @@ def _grounded_mesh(chain, wind_speed, mesh_size, far_field_factor,
 
 
 def generate_cfd_mesh(polygon, wind_angle=0, mesh_size=0.5, far_field_factor=15,
-                      bl_layers=None, bl_ratio=1.25, wind_speed=None, nu=1.5e-5,
+                      bl_layers=None, bl_ratio=1.4, wind_speed=None, nu=1.5e-5,
                       structured=False, grounded=False):
     """Generate a 2D CFD mesh around a cross-section polygon.
 
@@ -476,33 +519,11 @@ def generate_cfd_mesh(polygon, wind_angle=0, mesh_size=0.5, far_field_factor=15,
     far_field_r  = char_dim * far_field_factor
     ff_mesh_size = char_dim * 2.0
 
-    # ── First BL layer height (y⁺ = 50, wall functions) ─────────────
-    if wind_speed is not None and wind_speed > 0:
-        Re   = wind_speed * char_dim / nu
-        # Prandtl turbulent flat-plate: Cf ≈ 0.074 Re^(-0.2)
-        Cf    = 0.074 / max(Re, 1e4) ** 0.2
-        u_tau = wind_speed * math.sqrt(max(Cf / 2.0, 1e-10))
-        first_layer = max(5e-6, 50.0 * nu / u_tau)
-    else:
-        # Geometric fallback: ~0.3 % of char_dim
-        first_layer = max(2e-4, char_dim * 0.003)
-
-    # ── Adaptive layer count ──────────────────────────────────────────
-    # Grow until outermost cell ≥ mesh_size × 0.3  OR  total BL > 8 % char_dim
-    if bl_layers is None:
-        max_total = char_dim * 0.08
-        max_cell  = mesh_size * 0.3
-        n_ly = 1
-        while n_ly < 25:
-            if first_layer * bl_ratio ** n_ly > max_cell:
-                break
-            if first_layer * (bl_ratio ** n_ly - 1.0) / (bl_ratio - 1.0) > max_total:
-                break
-            n_ly += 1
-        bl_layers = max(4, n_ly)
-
-    # Outermost BL cell size — used to set the near-surface background mesh
-    bl_outer = first_layer * bl_ratio ** bl_layers
+    # ── Boundary-layer sizing (shared with the solver mesh) ───────────
+    # Single source of truth so the preview matches what gets solved.
+    first_layer, bl_layers, bl_ratio, bl_outer = boundary_layer_params(
+        char_dim, mesh_size, wind_speed=wind_speed, nu=nu,
+        bl_layers=bl_layers, bl_ratio=bl_ratio)
 
     # ── Gmsh geometry ─────────────────────────────────────────────────
     section_points = []

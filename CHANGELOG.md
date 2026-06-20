@@ -1,12 +1,38 @@
 # Changelog
 
-## Planned — v0.2
+## Unreleased — toward v0.2
 
-- **Mesh preview ↔ solver consistency:** the UI mesh preview and the solver
-  currently use two independent generators with different boundary-layer settings
-  (preview shows ~more BL layers than the solver uses). Goal: *what you preview is
-  what gets solved* — unify the BL parametrization (and optionally show mesh edges
-  in the result view so the boundary layer is visible).
+### Changed
+- **Mesh preview ↔ solver consistency (boundary layer):** the preview mesh and
+  the solver mesh now derive their boundary-layer sizing (first-layer height,
+  layer count, growth ratio) from a single shared function
+  (`tools/cfd_mesh.py:boundary_layer_params`), so *what you preview is what gets
+  solved*. Previously the preview used a wind-dependent y⁺=50 first layer with an
+  adaptive layer count while the solver used a fixed geometric sizing — the
+  preview could show a finer/different boundary layer than was actually solved.
+  The shared sizing keeps the solver's **first-layer height bit-identical** (same
+  geometric formula), so sharp-corner and smooth sections produce identical
+  node/element counts. This change also removes a redundant full mesh that was
+  generated and discarded on every solve; dropping that pre-pass perturbs Gmsh's
+  global state slightly, so **bluff sections shift by ≲1 %** (e.g. RUB deck:
+  12130→12054 nodes). Re-validation confirms this is within benchmark scatter:
+  RUB @α=4 gives Cd/Cl/Cm = 0.093 / 0.412 / 0.113 (Exp. ref 0.095 / 0.380 /
+  0.109), unchanged from the pre-refactor mesh. v0.1 conclusions stand.
+
+### Planned — v0.2
+
+- **Boundary-layer physics upgrade (step 2):** switch the shared sizing to the
+  physics-based y⁺=50 first layer (`50·ν/u_τ`, wind-dependent). This changes the
+  solved mesh, so it must land **behind a re-validation** of the DFG cylinder and
+  RUB bridge-deck benchmarks. One-line change in `boundary_layer_params`.
+- **Per-case far-field is currently dead data.** Each 2D test case declares a
+  `farField` (e.g. DFG cylinder and RUB both 25) but `_loadCase` never applies it
+  to the domain-size slider, so cases run at whatever the slider shows (default
+  15). The v0.1 validation numbers were therefore produced at far_field=15, not
+  the declared 25. Decide during the step-2 re-validation whether to wire
+  `tc.farField` into the slider — using the benchmark runs to confirm which
+  far-field actually best matches the references — rather than guessing now.
+- Optionally show mesh edges in the result view so the boundary layer is visible.
 - k-ω SST sweep of the 2D cases at their reference angles → more validated examples.
 - Take 3D building CFD and transient solving out of *beta*.
 

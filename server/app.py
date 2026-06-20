@@ -101,11 +101,15 @@ def cfd_mesh(body: dict):
     wind_speed = body.get("windSpeed", None)   # optional — improves BL sizing
     structured = body.get("structured", False)
     grounded   = body.get("grounded", False)
+    # Same BL controls the solver uses — so the preview matches what gets solved.
+    bl_layers  = int(body.get("blLayers", 4))
+    bl_ratio   = float(body.get("blRatio", 1.4))
 
     input_data = json.dumps({"polygon": polygon, "meshSize": mesh_size,
                               "farFieldFactor": far_field, "windAngle": wind_angle,
                               "windSpeed": wind_speed, "structured": structured,
-                              "grounded": grounded})
+                              "grounded": grounded, "blLayers": bl_layers,
+                              "blRatio": bl_ratio})
     script = f"""
 import json, sys
 sys.path.insert(0, r'{PROJECT_ROOT}')
@@ -115,7 +119,8 @@ ws = data['windSpeed']
 result = generate_cfd_mesh(data['polygon'], wind_angle=data['windAngle'],
     mesh_size=data['meshSize'], far_field_factor=data['farFieldFactor'],
     wind_speed=ws if ws else None, structured=data['structured'],
-    grounded=data['grounded'])
+    grounded=data['grounded'], bl_layers=data['blLayers'],
+    bl_ratio=data['blRatio'])
 print(json.dumps(result))
 """
     try:
