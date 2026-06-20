@@ -96,7 +96,9 @@ def cfd_mesh(body: dict):
         raise HTTPException(status_code=400, detail="Polygon needs at least 3 points")
 
     mesh_size  = body.get("meshSize", 0.2)
-    far_field  = body.get("farFieldFactor", 15)
+    # Front-end sends the domain-size slider as "farField"; accept the historical
+    # "farFieldFactor" too. (Both are the far-field radius as a multiple of char_dim.)
+    far_field  = body.get("farField", body.get("farFieldFactor", 15))
     wind_angle = body.get("windAngle", 0)
     wind_speed = body.get("windSpeed", None)   # optional — improves BL sizing
     structured = body.get("structured", False)
@@ -161,7 +163,8 @@ def cfd_solve(body: dict):
         raise HTTPException(status_code=400, detail="Need at least 3 polygon points")
 
     mesh_size  = body.get("meshSize", 0.2)
-    far_field  = body.get("farFieldFactor", 15)
+    # Match the mesh endpoint: front-end sends the domain-size slider as "farField".
+    far_field  = body.get("farField", body.get("farFieldFactor", 15))
     wind_speed = body.get("windSpeed", 20.0)
     wind_angle = body.get("windAngle", 0)
     transient  = body.get("transient", False)

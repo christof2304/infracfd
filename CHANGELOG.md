@@ -19,6 +19,13 @@
   RUB @α=4 gives Cd/Cl/Cm = 0.093 / 0.412 / 0.113 (Exp. ref 0.095 / 0.380 /
   0.109), unchanged from the pre-refactor mesh. v0.1 conclusions stand.
 
+### Fixed
+- **2D domain-size slider had no effect.** The front-end sent the slider as
+  `farField` while the backend read `farFieldFactor`, so every 2D mesh/solve
+  silently used the default factor 15 regardless of the slider. The backend now
+  accepts `farField` (falling back to `farFieldFactor`). Default 15 is unchanged,
+  so v0.1 validation results (run at the default) are unaffected.
+
 ### Planned — v0.2
 
 - **Boundary-layer physics upgrade (step 2):** switch the shared sizing to the
