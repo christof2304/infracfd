@@ -1200,10 +1200,16 @@ echo "=== DONE ==="
         log += result.stderr.decode("utf-8", errors="replace")
         success = "=== DONE ===" in log and "FOAM FATAL" not in log
 
-        print(f"  [3/4] simpleFoam {'OK' if success else 'FAILED'}")
-
         # Step 4: Parse results
         force_coeffs = _parse_force_coeffs(case_dir)
+        # pimpleFoam can finish the run loop yet have diverged (impulsive start on
+        # thin/sharp sections): the coefficients then read 1e+70+ or NaN. Treat
+        # that as a failed solve rather than surfacing garbage as success.
+        if success and _coeffs_diverged(force_coeffs):
+            success = False
+            log += "\n=== SOLVER DIVERGED (force coefficients non-finite / abnormal) ==="
+
+        print(f"  [3/4] simpleFoam {'OK' if success else 'FAILED'}")
         print(f"  [4/4] Force coefficients: {force_coeffs}")
 
         return {
@@ -1215,6 +1221,28 @@ echo "=== DONE ==="
         return {"success": False, "log": "WSL not found", "force_coefficients": None}
     except subprocess.TimeoutExpired:
         return {"success": False, "log": "simpleFoam timed out (300s)", "force_coefficients": None}
+
+
+def _coeffs_diverged(fc):
+    """True if force coefficients are non-finite or absurdly large.
+
+    A transient pimpleFoam run can print "=== DONE ===" without a FOAM FATAL
+    yet have blown up numerically — the impulsive free-stream start overshoots
+    on thin/sharp sections and the field diverges, leaving Cd/Cl/Cm at 1e+70+
+    or NaN/Inf. No physical force coefficient, however undeveloped a snapshot,
+    approaches 1e6, so that threshold cleanly separates divergence from a merely
+    unconverged early-time value. Used to stop run_openfoam reporting a blown-up
+    solve as success with garbage coefficients.
+    """
+    if not fc:
+        return False
+    for k in ("Cd", "Cl", "Cm"):
+        v = fc.get(k)
+        if v is None:
+            continue
+        if not math.isfinite(v) or abs(v) > 1e6:
+            return True
+    return False
 
 
 def _parse_force_coeffs(case_dir):

@@ -20,6 +20,18 @@
   0.109), unchanged from the pre-refactor mesh. v0.1 conclusions stand.
 
 ### Fixed
+- **Diverged transient solves were reported as success.** A `pimpleFoam` run that
+  blows up on the impulsive start (thin/sharp sections) crashes with a floating-
+  point exception, but the run wrapper still echoes `=== DONE ===`, so
+  `run_openfoam` returned `success=True` with garbage force coefficients
+  (Cd≈1e+70…1e+116 or NaN). It now flags non-finite / absurdly large (>1e6)
+  coefficients as a failed solve (`_coeffs_diverged`). A smoke test of all 19 2D
+  cases in transient mode (`tools/_smoke_transient.py`) shows 9 run clean, 5 are
+  budget-timeouts on fine meshes (cylinder, RUB, Millau, both NACA), 4 diverge
+  (Vortex T / Vortex Double-T / Noise barrier / Airrail shell) and 1 hits the
+  mesh-gen timeout (Two houses). The same wrapper pattern exists in the 3D
+  (experimental) solver paths — not yet hardened. Reinforces the *beta* status of
+  transient solving.
 - **2D domain-size slider had no effect.** The front-end sent the slider as
   `farField` while the backend read `farFieldFactor`, so every 2D mesh/solve
   silently used the default factor 15 regardless of the slider. The backend now
