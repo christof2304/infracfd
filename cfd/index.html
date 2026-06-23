@@ -593,6 +593,18 @@ select.p-input option { background: var(--bg-panel); }
     min-width: 56px;
     text-align: right;
 }
+#anim-speed {
+    height: 26px;
+    background: var(--bg-deep);
+    border: 1px solid var(--border-hi);
+    border-radius: 4px;
+    color: var(--text-dim);
+    font-size: 10px;
+    font-family: var(--font-mono);
+    cursor: pointer;
+    padding: 0 2px;
+}
+#anim-speed:hover { color: var(--accent); border-color: var(--accent); }
 
 /* ── Status bar progress ──────────────────────────────────── */
 #statusbar-progress {
@@ -694,6 +706,12 @@ select.p-input option { background: var(--bg-panel); }
         <button class="anim-btn" id="anim-next"  title="Forward">▶▶</button>
         <button class="anim-btn" id="anim-last"  title="Last time step">⏭</button>
         <input type="range" id="anim-slider" min="0" value="0">
+        <select id="anim-speed" title="Playback speed">
+            <option value="2">2×</option>
+            <option value="1" selected>1×</option>
+            <option value="0.5">0.5×</option>
+            <option value="0.25">0.25×</option>
+        </select>
         <span id="anim-time">t = 0 s</span>
     </div>
 

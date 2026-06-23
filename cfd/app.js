@@ -1699,6 +1699,14 @@ class CFDApp {
             document.getElementById('anim-prev').addEventListener('click',  () => { this._animStop(); this._animGoto(this._animIdx - 1); });
             document.getElementById('anim-next').addEventListener('click',  () => { this._animStop(); this._animGoto(this._animIdx + 1); });
             slider.addEventListener('input', () => { this._animStop(); this._animGoto(+slider.value); });
+
+            // Playback speed multiplier — takes effect on the next frame (delay is
+            // recomputed each step), so it works live while the animation is playing.
+            const speedSel = document.getElementById('anim-speed');
+            this._animSpeed = parseFloat(speedSel.value) || 1;
+            speedSel.addEventListener('change', () => {
+                this._animSpeed = parseFloat(speedSel.value) || 1;
+            });
         }
 
         // Pre-fetch all frames in background for smooth playback
@@ -1817,8 +1825,9 @@ class CFDApp {
                 // Fixed-rate playback for smooth motion. Pacing each frame by its
                 // real simulation dt looks frozen now that a run writes ~40 frames
                 // over tens of seconds (1.5 s sim-dt → a 1.5 s hold per frame).
-                // A constant FPS plays the cached frames back as a fluid loop.
-                delay = 1000 / (this._animFps || 12);
+                // A constant FPS plays the cached frames back as a fluid loop;
+                // the user-set speed multiplier scales it (0.5× = half speed).
+                delay = 1000 / ((this._animFps || 12) * (this._animSpeed || 1));
             }
             this._animTimer = setTimeout(() => this._animStep(), delay);
         });
