@@ -137,6 +137,35 @@ UI). See the case notes in `cfd-testcases.js`.
 
 ---
 
+## Transient — vortex shedding *(experimental)*
+
+Beyond the steady-state core, infraCFD can run **time-resolved (transient)** 2D
+simulations that capture **vortex shedding** — the alternating Kármán vortex
+street behind a bluff body and the cyclic lift it produces. Those cyclic forces
+are what drive wind-induced vibrations of chimneys, cables, bridge girders and
+towers.
+
+Two built-in demo cases run a laminar **Re = 1000** solve (`pimpleFoam`) and
+auto-enable transient mode when loaded:
+
+| Case | Mesh | t<sub>end</sub> | c_d | Strouhal St | Lift c_l (oscillation) |
+|---|---|---|---|---|---|
+| **Circular cylinder** | structured O-grid | 60 s | ≈ 1.2 | ≈ 0.21 | ± 0.5 |
+| **Square** | unstructured | 80 s | ≈ 2.0 | ≈ 0.14 | ± 1.5 |
+
+The square's sharp corners fix the separation points, so it sheds **stronger**
+vortices at a **lower** frequency than the smoothly-separating cylinder — same
+physics, very different signature. The animation bar plays the cached frames back
+as a loop, with a playback-speed control.
+
+> **Experimental — not benchmark-validated.** These demos are 2D and laminar,
+> built for intuition and a qualitative first look — the **steady-state 2D solver
+> remains the validated core** (see [Validation](#validation)). Transient
+> robustness depends on the geometry: smooth or clean-edged sections (cylinder,
+> square) run well; thin/sharp sections can diverge on the impulsive start.
+
+---
+
 ## Project Structure
 
 ```
