@@ -1811,13 +1811,11 @@ class CFDApp {
             if (!this._animCacheReady) {
                 delay = 500; // 2 FPS while loading
             } else {
-                // Real-time playback: hold each frame for its actual simulation dt
-                const curr = this._animIdx;
-                const nxt  = (curr + 1) % n;
-                const dt = nxt > curr
-                    ? this._animTimeSteps[nxt] - this._animTimeSteps[curr]
-                    : (n > 1 ? this._animTimeSteps[n-1] - this._animTimeSteps[n-2] : 0.1);
-                delay = Math.max(50, dt * 1000);
+                // Fixed-rate playback for smooth motion. Pacing each frame by its
+                // real simulation dt looks frozen now that a run writes ~40 frames
+                // over tens of seconds (1.5 s sim-dt → a 1.5 s hold per frame).
+                // A constant FPS plays the cached frames back as a fluid loop.
+                delay = 1000 / (this._animFps || 12);
             }
             this._animTimer = setTimeout(() => this._animStep(), delay);
         });
