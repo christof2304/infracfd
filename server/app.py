@@ -178,7 +178,7 @@ def cfd_solve(body: dict):
     # Turbulence + parity parameters (defaults preserve historical behaviour).
     # turbulence_model is interpolated into the worker script, so restrict it to a
     # known whitelist to avoid code injection.
-    _ALLOWED_TURB = {"kEpsilon", "realizableKE", "RNGkEpsilon", "kOmegaSST", "kOmega"}
+    _ALLOWED_TURB = {"kEpsilon", "realizableKE", "RNGkEpsilon", "kOmegaSST", "kOmega", "laminar"}
     turbulence_model = body.get("turbulenceModel", "kEpsilon")
     if turbulence_model not in _ALLOWED_TURB:
         turbulence_model = "kEpsilon"

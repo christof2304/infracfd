@@ -74,7 +74,7 @@ export const CFD_TEST_CASES = [
     },
     {
         name: "Circular cylinder",
-        desc: "Reference: Re-dependent cD (~1.2 at Re>10^5)",
+        desc: "Kármán vortex street — laminar Re=1000 transient demo (St≈0.21, Cd≈1.2). Loading auto-enables transient.",
         polygon: (() => {
             const pts = [];
             const n = 64;
@@ -84,10 +84,20 @@ export const CFD_TEST_CASES = [
             }
             return pts;
         })(),
-        windSpeed: 15,
-        meshSize: 0.03,
-        farField: 25,
-        expected: { cD: "~1.0-1.2", cL: "~0 (mean)", cM: "~0" },
+        // Vortex-shedding demo: a structured O-grid (clean quad wake) + laminar
+        // solve at Re = U·D/nu = 1·1/0.001 = 1000 gives the textbook Kármán street.
+        // RAS eddy-viscosity over-damps the wake; full-scale Re (~1e6) diverges on
+        // the impulsive start and is far too slow. The 2° wind angle seeds the
+        // shedding instability so it saturates within the run.
+        windSpeed: 1,
+        windAngle: 2,
+        nu: 0.001,
+        meshSize: 0.018,
+        farField: 15,
+        structured: true,
+        turbulenceModel: 'laminar',
+        transient: { endTime: 60, dt: 0.2 },
+        expected: { cD: "~1.2", cL: "±0.5 (shedding)", cM: "~0" },
     },
     {
         name: "Cable-stayed bridge deck",

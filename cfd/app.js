@@ -196,13 +196,30 @@ class CFDApp {
         if (!tc || tc.mode === '3d') return;
         this._tc2d = tc;
         this._draw.setPolygon(tc.polygon);
+        const windAngle = tc.windAngle ?? 0;
         document.getElementById('wind-speed').value = tc.windSpeed;
-        document.getElementById('wind-angle').value = 0;
+        document.getElementById('wind-angle').value = windAngle;
         document.getElementById('mesh-density').value = 50;
         document.getElementById('turbulence-model').value = tc.turbulenceModel || 'kEpsilon';
+
+        // Cases with a transient block (e.g. the cylinder vortex-shedding demo)
+        // auto-enable transient mode and pre-fill its tuned end-time / time-step;
+        // all others reset to steady so a previous transient selection can't leak.
+        const transientCb   = document.getElementById('transient');
+        const transientOpts = document.getElementById('transient-opts');
+        if (tc.transient) {
+            transientCb.checked = true;
+            transientOpts.style.display = 'block';
+            document.getElementById('end-time').value = tc.transient.endTime;
+            document.getElementById('dt').value = tc.transient.dt;
+        } else {
+            transientCb.checked = false;
+            transientOpts.style.display = 'none';
+        }
+
         this._setTab('2d');
         this._resetResult();
-        this._drawWindIndicator(0, tc.windSpeed);
+        this._drawWindIndicator(windAngle, tc.windSpeed);
         this._setStatus(`Loaded: ${tc.name} — ${tc.desc}`);
     }
 

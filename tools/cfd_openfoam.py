@@ -304,6 +304,15 @@ transportModel  Newtonian;
 nu              [0 2 -1 0 0 0 0] {nu};
 """)
 
+    # "laminar" runs a direct (no turbulence-model) 2D simulation — used by the
+    # low-Re vortex-shedding demos (clean Kármán street; RAS eddy-viscosity over-
+    # damps the wake). k/epsilon|omega/nut fields are still written but go unused.
+    if turbulence_model == "laminar":
+        sim_block = "simulationType  laminar;"
+    else:
+        sim_block = (f"simulationType  RAS;\nRAS\n{{\n"
+                     f"    RASModel        {turbulence_model};\n"
+                     f"    turbulence      on;\n    printCoeffs     on;\n}}")
     _write_of_file(case_dir / "constant" / "turbulenceProperties", None, None, f"""
 FoamFile
 {{
@@ -312,13 +321,7 @@ FoamFile
     class       dictionary;
     object      turbulenceProperties;
 }}
-simulationType  RAS;
-RAS
-{{
-    RASModel        {turbulence_model};
-    turbulence      on;
-    printCoeffs     on;
-}}
+{sim_block}
 """)
 
     # ── system/ — Solver settings ──
@@ -340,7 +343,12 @@ RAS
         # uniform regardless of the varying dt.
         delta_t = min(dt, 1.0e-5)
         write_ctrl = "adjustableRunTime"
-        write_int  = round(max(min(0.1, end_time / 30.0), dt), 6)  # ~30 frames
+        # ~40 animation frames, never finer than the timestep. The old
+        # min(0.1, end_time/30) capped the interval at 0.1 s, so a 60 s vortex-
+        # shedding run wrote 600 frames — bloating reconstructPar/IO to minutes
+        # for no visual benefit. Targeting a frame COUNT keeps reconstruct cheap
+        # and animation spacing uniform across short and long runs alike.
+        write_int  = round(max(end_time / 40.0, dt), 6)  # ~40 frames
         purge = 0  # keep all time steps for animation
         adjust_block = f"adjustTimeStep  yes;\nmaxCo           5;\nmaxDeltaT       {dt};"
     else:

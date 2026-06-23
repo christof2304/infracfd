@@ -109,7 +109,11 @@ def _omesh(polygon, wind_speed, mesh_size, far_field_factor, nu):
         Re = max(wind_speed * char_dim / nu, 1e4)
         Cf = 0.074 / Re ** 0.2
         u_tau = wind_speed * math.sqrt(max(Cf / 2.0, 1e-10))
-        first_layer = max(5e-6, 50.0 * nu / u_tau)
+        # Cap at 1% of the body: the y+ formula divides by u_tau, which for the
+        # low-Re vortex-shedding demos (high nu / low U) blows the first layer up
+        # to metres — far bigger than the body. The cap is inert at high Re (the
+        # y+ layer is already microns there) and only rescues the low-Re regime.
+        first_layer = max(5e-6, min(50.0 * nu / u_tau, char_dim * 0.01))
     else:
         first_layer = max(2e-4, char_dim * 0.003)
 
