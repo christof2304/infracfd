@@ -13,12 +13,22 @@ export const CFD_TEST_CASES = [
     },
     {
         name: "Square",
-        desc: "Bluff cross-section, strong vortex shedding",
+        desc: "Bluff-body vortex street — laminar Re=1000 transient demo (St≈0.14, Cd≈2.0). Loading auto-enables transient.",
         polygon: [[0, 0], [1, 0], [1, 1], [0, 1]],
-        windSpeed: 20,
-        meshSize: 0.05,
-        farField: 20,
-        expected: { cD: "~2.0", cL: "~0", cM: "~0" },
+        // Like the cylinder, a laminar Re = U·D/nu = 1000 solve gives a clean,
+        // strong Kármán street (sharp corners fix the separation, so no trigger
+        // angle is needed). Full-scale Re (~1e6) diverges / is far too slow.
+        // The square is unstructured (sharp corners → no O-grid), so meshDensity
+        // is pinned coarser to keep the transient runtime near the cylinder's.
+        windSpeed: 1,
+        windAngle: 0,
+        nu: 0.001,
+        meshSize: 0.03,
+        meshDensity: 25,
+        farField: 15,
+        turbulenceModel: 'laminar',
+        transient: { endTime: 80, dt: 0.2 },
+        expected: { cD: "~2.0", cL: "±1.5 (shedding)", cM: "~0" },
     },
     {
         name: "Box girder narrow",

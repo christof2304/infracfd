@@ -199,7 +199,10 @@ class CFDApp {
         const windAngle = tc.windAngle ?? 0;
         document.getElementById('wind-speed').value = tc.windSpeed;
         document.getElementById('wind-angle').value = windAngle;
-        document.getElementById('mesh-density').value = 50;
+        // Unstructured cases (e.g. the square vortex demo) can pin a coarser mesh
+        // density: the default 50 (~55 cells across the body) is far finer/slower
+        // than needed and would multiply the transient runtime several-fold.
+        document.getElementById('mesh-density').value = tc.meshDensity ?? 50;
         document.getElementById('turbulence-model').value = tc.turbulenceModel || 'kEpsilon';
 
         // Cases with a transient block (e.g. the cylinder vortex-shedding demo)
