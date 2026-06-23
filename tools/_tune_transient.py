@@ -32,6 +32,7 @@ HARBOUR = [
 CASES = {
     "cyl":     dict(poly=cylinder_poly(), U=15, ms=0.03, ff=25, char=1.0),
     "harbour": dict(poly=HARBOUR,         U=34, ms=0.30, ff=12, char=22.68),
+    "square":  dict(poly=[[0,0],[1,0],[1,1],[0,1]], U=20, ms=0.05, ff=20, char=1.0),
 }
 
 
