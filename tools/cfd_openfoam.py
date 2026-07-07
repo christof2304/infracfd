@@ -47,7 +47,7 @@ def create_openfoam_case(mesh_result, wind_speed=20.0, wind_angle=0.0,
                          nu=1.5e-5, turbulence_intensity=0.05,
                          turbulence_model='kEpsilon', turbulence_length_scale=None,
                          output_dir=None, transient=False, end_time=5.0, dt=0.001,
-                         write_interval=100, grounded=None):
+                         write_interval=100, grounded=None, quiescent_start=False):
     """
     Create an OpenFOAM case directory from a CFD mesh result.
 
@@ -77,6 +77,14 @@ def create_openfoam_case(mesh_result, wind_speed=20.0, wind_angle=0.0,
     rad = math.radians(wind_angle)
     Ux = wind_speed * math.cos(rad)
     Uy = wind_speed * math.sin(rad)
+
+    # Soft start for transient runs on sharp/thin sections (e.g. bridge-deck
+    # legs): initialise the interior at rest so the free stream arrives by
+    # diffusion from the far field instead of as an impulsive shock that blows
+    # up the under-resolved edges. The far-field / inlet BC stays at the target
+    # velocity; only the initial internal field changes. Steady runs and cases
+    # that don't opt in keep the uniform free-stream IC.
+    ic_U = "0 0 0" if (transient and quiescent_start) else f"{Ux} {Uy} 0"
 
     # Turbulence model + inlet turbulence.
     # tvar = second turbulence field: "epsilon" (k-epsilon family) or "omega" (k-omega SST).
@@ -113,7 +121,7 @@ def create_openfoam_case(mesh_result, wind_speed=20.0, wind_angle=0.0,
         # passes under the bodies — they stand on the ground.
         _write_of_file(case_dir / "0" / "U", "volVectorField", "U", f"""
 dimensions      [0 1 -1 0 0 0 0];
-internalField   uniform ({Ux} {Uy} 0);
+internalField   uniform ({ic_U});
 boundaryField
 {{
     inlet   {{ type fixedValue; value uniform ({Ux} {Uy} 0); }}
@@ -180,7 +188,7 @@ boundaryField
       # U (velocity)
       _write_of_file(case_dir / "0" / "U", "volVectorField", "U", f"""
 dimensions      [0 1 -1 0 0 0 0];
-internalField   uniform ({Ux} {Uy} 0);
+internalField   uniform ({ic_U});
 boundaryField
 {{
     farfield
@@ -343,12 +351,13 @@ FoamFile
         # uniform regardless of the varying dt.
         delta_t = min(dt, 1.0e-5)
         write_ctrl = "adjustableRunTime"
-        # ~40 animation frames, never finer than the timestep. The old
-        # min(0.1, end_time/30) capped the interval at 0.1 s, so a 60 s vortex-
-        # shedding run wrote 600 frames — bloating reconstructPar/IO to minutes
-        # for no visual benefit. Targeting a frame COUNT keeps reconstruct cheap
-        # and animation spacing uniform across short and long runs alike.
-        write_int  = round(max(end_time / 40.0, dt), 6)  # ~40 frames
+        # ~150 animation frames, never finer than the timestep. Targeting a frame
+        # COUNT keeps animation spacing uniform across short and long runs. 150
+        # (up from 40) gives smooth, shareable video of the vortex shedding —
+        # ~10 frames per shedding cycle — at a modest reconstructPar/IO cost (the
+        # old 600-frame writeControl bloated reconstruct to minutes; 150 stays
+        # well under that). The frontend prefetches frames in parallel batches.
+        write_int  = round(max(end_time / 150.0, dt), 6)  # ~150 frames
         purge = 0  # keep all time steps for animation
         adjust_block = f"adjustTimeStep  yes;\nmaxCo           5;\nmaxDeltaT       {dt};"
     else:

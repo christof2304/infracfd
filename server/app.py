@@ -174,6 +174,10 @@ def cfd_solve(body: dict):
     bl_ratio   = float(body.get("blRatio", 1.4))
     structured = body.get("structured", False)
     grounded   = body.get("grounded", False)
+    # Soft start (transient only): initialise the interior at rest so the free
+    # stream builds up gradually instead of shocking sharp/thin sections into a
+    # blow-up. Opt-in per case (e.g. the Harbour transient demo).
+    quiescent_start = bool(body.get("quiescentStart", False))
 
     # Turbulence + parity parameters (defaults preserve historical behaviour).
     # turbulence_model is interpolated into the worker script, so restrict it to a
@@ -210,7 +214,7 @@ try:
         nu={nu}, turbulence_intensity={turb_intensity},
         turbulence_model={turbulence_model!r}, turbulence_length_scale={turb_length!r},
         output_dir=r'{case_dir}', transient={transient}, end_time={end_time}, dt={dt},
-        grounded={grounded})
+        grounded={grounded}, quiescent_start={quiescent_start})
     result = run_openfoam(case, polygon, mesh_size={mesh_size}, far_field_factor={far_field},
         bl_layers={bl_layers}, bl_ratio={bl_ratio},
         structured={structured}, wind_speed={wind_speed}, n_procs={4 if transient else 1},

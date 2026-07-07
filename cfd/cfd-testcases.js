@@ -150,6 +150,41 @@ export const CFD_TEST_CASES = [
         expected: { cD: "Dolfyn ref", cL: "Dolfyn ref", cM: "Dolfyn ref" },
     },
     {
+        name: "Harbour Bridge (transient demo)",
+        desc: "Vortex-shedding demo of the Harbour deck — laminar Re≈1000, quiescent soft start. Loading auto-enables transient. Sheds a Kármán-like wake (St≈0.15) with a mean lift from the asymmetric section; the developed oscillation appears after ~t=20 s. The validated steady benchmark is the separate 'Harbour Bridge Deck' case (which keeps its reference orientation).",
+        // Roadway-up orientation (vertical flip of the Dolfyn benchmark polygon,
+        // y -> 2.75 - y) so the deck loads the right way round without a manual
+        // flip. A top/bottom flip is aerodynamically a mirror image: Cd, the
+        // shedding and St are unchanged; only the sign of Cl/Cm flips vs the
+        // benchmark orientation.
+        polygon: [
+            [0.66, 2.75], [0.66, 3.75], [0.83, 3.75], [1, 2.75],
+            [11, 2.55], [11.17, 3.55], [11.34, 3.55], [11.34, 2.27],
+            [6.7, 2.0], [3.6, -1.0],
+            [-3.6, -1.0], [-6.7, 2.0],
+            [-11.34, 2.27], [-11.34, 3.55], [-11.17, 3.55], [-11, 2.55],
+            [-1, 2.75], [-0.83, 3.75], [-0.66, 3.75], [-0.66, 2.75],
+        ],
+        // Laminar Re = U·D/nu = 10·3.75/0.0375 = 1000 on the 3.75 m deck depth.
+        // Full scale (U=34, air) diverges on the impulsive start off the sharp,
+        // under-resolved deck legs. The fix is `quiescentStart`: the interior
+        // begins at rest so the free stream builds up gradually instead of
+        // shocking those edges (an impulsive-IC run blows up to Cd~1e8 by t≈1.5).
+        // Verified stable to t=60, St≈0.15, Cl oscillation ±~0.4 (roadway-up
+        // orientation → the mean-lift sign is the mirror of the -0.85 measured on
+        // the benchmark orientation). The deck's top/bottom asymmetry
+        // self-triggers the wake (no angle needed). ~2 min on 4 cores.
+        windSpeed: 10,
+        windAngle: 0,
+        nu: 0.0375,
+        meshDensity: 70,
+        farField: 6,
+        turbulenceModel: 'laminar',
+        quiescentStart: true,
+        transient: { endTime: 60, dt: 0.15 },
+        expected: { cD: "~0.2", cL: "±0.4 about +0.85 (shedding)", cM: "~+0.08" },
+    },
+    {
         name: "RUB Bridge Deck (Dolfyn)",
         desc: "Ruhr University wind-tunnel model, trapezoidal. SOFiSTiK parity: U=5 m/s, ν=1.373e-5, k-ω SST, EPS length scale 20mm. For α=4° set windAngle=4.",
         polygon: [
