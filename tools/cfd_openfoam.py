@@ -1133,11 +1133,12 @@ relaxationFactors
             f'echo "=== decomposePar ({n_procs} domains) ==="\n'
             f'decomposePar -force 2>&1 | tail -3\n'
             f'mpirun --allow-run-as-root --oversubscribe -np {n_procs} $SOLVER -parallel 2>&1 || $SOLVER 2>&1\n'
+            f'echo "=== SOLVER_RC=$? ==="\n'
             f'echo "=== reconstructPar ==="\n'
             f'{reconstruct} 2>&1 | tail -3'
         )
     else:
-        run_block = "$SOLVER 2>&1 || true"
+        run_block = '$SOLVER 2>&1\necho "=== SOLVER_RC=$? ==="'
     of_script = f"""#!/bin/bash
 for _of in /usr/lib/openfoam/openfoam2412/etc/bashrc /usr/lib/openfoam/openfoam2406/etc/bashrc /opt/openfoam*/etc/bashrc; do [ -f "$_of" ] && source "$_of" && break; done
 cd "{of_case}"
@@ -1206,13 +1207,15 @@ echo "=== DONE ==="
         result = _run_of_script(script_path, case_dir, timeout=timeout)
         log = result.stdout.decode("utf-8", errors="replace")
         log += result.stderr.decode("utf-8", errors="replace")
-        success = "=== DONE ===" in log and "FOAM FATAL" not in log
+        success = _solver_succeeded(log)
 
         # Step 4: Parse results
         force_coeffs = _parse_force_coeffs(case_dir)
-        # pimpleFoam can finish the run loop yet have diverged (impulsive start on
-        # thin/sharp sections): the coefficients then read 1e+70+ or NaN. Treat
-        # that as a failed solve rather than surfacing garbage as success.
+        # A solver can exit 0 yet have diverged: with FOAM_SIGFPE off, an
+        # impulsive-start blow-up on thin/sharp sections propagates NaN instead
+        # of trapping, so pimpleFoam finishes the loop with coefficients at
+        # 1e+70+ or NaN. Treat that as a failed solve rather than surfacing
+        # garbage as success.
         if success and _coeffs_diverged(force_coeffs):
             success = False
             log += "\n=== SOLVER DIVERGED (force coefficients non-finite / abnormal) ==="
@@ -1251,6 +1254,24 @@ def _coeffs_diverged(fc):
         if not math.isfinite(v) or abs(v) > 1e6:
             return True
     return False
+
+
+def _solver_succeeded(log):
+    """True if the solver ran to completion with a zero exit code.
+
+    The run scripts echo `=== SOLVER_RC=$? ===` immediately after the solver
+    invocation (before reconstructPar / post-processing), so the solver's exit
+    status is captured authoritatively — an FPE/segfault exits non-zero and is
+    caught here even though it produces no "FOAM FATAL" line. This is
+    deliberately narrower than scanning the whole log for a crash signature:
+    potentialFoam initialisation (before the solver) and the trailing
+    postProcess steps (after it) run under `|| true` and are ALLOWED to crash
+    without failing the solve. An FPE in potentialFoam is common on skewed
+    meshes and does not affect the pimpleFoam solve, so a log-wide crash scan
+    false-positives on it. The `=== DONE ===` marker additionally guards against
+    the script being killed (timeout) between the solver and DONE.
+    """
+    return "=== SOLVER_RC=0 ===" in log and "=== DONE ===" in log
 
 
 def _parse_force_coeffs(case_dir):
@@ -2136,7 +2157,8 @@ echo "=== renumberMesh ==="
 renumberMesh -overwrite 2>&1 | tail -3 || true
 
 echo "=== simpleFoam ({n_procs} procs) ==="
-{"decomposePar 2>&1 | tail -3 && mpirun --allow-run-as-root --oversubscribe -np " + str(n_procs) + " simpleFoam -parallel 2>&1 || simpleFoam 2>&1" if n_procs > 1 else "simpleFoam 2>&1"} || true
+{"decomposePar 2>&1 | tail -3 && mpirun --allow-run-as-root --oversubscribe -np " + str(n_procs) + " simpleFoam -parallel 2>&1 || simpleFoam 2>&1" if n_procs > 1 else "simpleFoam 2>&1"}
+echo "=== SOLVER_RC=$? ==="
 
 {"reconstructPar 2>&1 | tail -3" if n_procs > 1 and transient else ("reconstructPar -latestTime 2>&1 | tail -3" if n_procs > 1 else "")}
 
@@ -2154,11 +2176,17 @@ echo "=== DONE ==="
         result = _run_of_script(script_path, case_dir, timeout=900)
         log = result.stdout.decode("utf-8", errors="replace")
         log += result.stderr.decode("utf-8", errors="replace")
-        success = "=== DONE ===" in log and "FOAM FATAL" not in log
+        success = _solver_succeeded(log)
 
         force_coeffs  = _parse_force_coeffs(case_dir)
         force_history = _parse_force_history(case_dir) if transient else None
         time_steps    = _list_time_steps(case_dir) if transient else []
+
+        # A run can reach "=== DONE ===" yet have diverged (impulsive start on
+        # sharp building edges): the coefficients then read 1e+70+ or NaN.
+        if success and _coeffs_diverged(force_coeffs):
+            success = False
+            log += "\n=== SOLVER DIVERGED (force coefficients non-finite / abnormal) ==="
 
         # Parse mesh cell count from polyMesh/owner (one entry per cell)
         n_cells = 0
@@ -2767,7 +2795,8 @@ renumberMesh -overwrite 2>&1 | tail -3 || true
 decomposePar 2>&1 | tail -5
 '''}
 echo "=== Starting simpleFoam ==="
-{"mpirun --allow-run-as-root --oversubscribe -np " + str(n_procs) + " simpleFoam -parallel 2>&1 || simpleFoam 2>&1" if use_parallel else "simpleFoam 2>&1"} || true
+{"mpirun --allow-run-as-root --oversubscribe -np " + str(n_procs) + " simpleFoam -parallel 2>&1 || simpleFoam 2>&1" if use_parallel else "simpleFoam 2>&1"}
+echo "=== SOLVER_RC=$? ==="
 
 {"" if not use_parallel else ('echo "=== reconstructPar ==="\nreconstructPar 2>&1 | tail -3' if transient else 'echo "=== reconstructPar ==="\nreconstructPar -latestTime 2>&1 | tail -3')}
 
@@ -2790,13 +2819,19 @@ echo "=== DONE ==="
         result = _run_of_script(script_path, case_dir, timeout=600)
         log = result.stdout.decode("utf-8", errors="replace")
         log += result.stderr.decode("utf-8", errors="replace")
-        success = "=== DONE ===" in log and "FOAM FATAL" not in log
-
-        print(f"  [3/4] simpleFoam {'OK' if success else 'FAILED'}")
+        success = _solver_succeeded(log)
 
         force_coeffs  = _parse_force_coeffs(case_dir)
         force_history = _parse_force_history(case_dir) if transient else None
         time_steps    = _list_time_steps(case_dir) if transient else []
+
+        # A run can reach "=== DONE ===" yet have diverged (impulsive start on
+        # sharp building edges): the coefficients then read 1e+70+ or NaN.
+        if success and _coeffs_diverged(force_coeffs):
+            success = False
+            log += "\n=== SOLVER DIVERGED (force coefficients non-finite / abnormal) ==="
+
+        print(f"  [3/4] simpleFoam {'OK' if success else 'FAILED'}")
         print(f"  [4/4] Force coefficients: {force_coeffs}, time steps: {len(time_steps)}")
 
         return {
