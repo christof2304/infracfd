@@ -1,9 +1,9 @@
 // app.js — CFD Wind Analysis standalone app
 
 import * as THREE from 'three';
-import { Draw2D } from './draw2d.js';
-import { Viewer3D } from './viewer3d.js';
-import { CFD_TEST_CASES } from './cfd-testcases.js';
+import { Draw2D } from './draw2d.js?v=20260707e';
+import { Viewer3D } from './viewer3d.js?v=20260707e';
+import { CFD_TEST_CASES } from './cfd-testcases.js?v=20260707e';
 
 // API base: localhost:8000 in dev (when served from a different port), same-origin in prod
 const API_BASE = (location.hostname === 'localhost' || location.hostname === '127.0.0.1') && location.port !== '8000'
@@ -203,6 +203,9 @@ class CFDApp {
         // density: the default 50 (~55 cells across the body) is far finer/slower
         // than needed and would multiply the transient runtime several-fold.
         document.getElementById('mesh-density').value = tc.meshDensity ?? 50;
+        // Honour the case's computational-domain factor (was previously ignored,
+        // so every case silently ran at the slider default of 15×).
+        document.getElementById('domain-size').value = tc.farField ?? 15;
         document.getElementById('turbulence-model').value = tc.turbulenceModel || 'kEpsilon';
 
         // Cases with a transient block (e.g. the cylinder vortex-shedding demo)
@@ -760,6 +763,7 @@ class CFDApp {
 
         this._setStatus('Generating mesh…');
         this._showLog();
+        this._resetSolveWidget(transient ? endTime : null);
 
         try {
             const meshRes = await fetch(api('/api/cfd/mesh'), {
@@ -802,7 +806,8 @@ class CFDApp {
                     turbulenceModel,
                     turbulenceLengthScale: this._tc2d?.turbulenceLengthScale,
                     turbulenceIntensity: this._tc2d?.turbulenceIntensity,
-                    nu: this._tc2d?.nu
+                    nu: this._tc2d?.nu,
+                    quiescentStart: this._tc2d?.quiescentStart ?? false
                 })
             });
             if (!solveRes.ok) throw new Error(await solveRes.text());
@@ -946,9 +951,11 @@ class CFDApp {
     }
 
     _showLog() {
-        document.getElementById('log-panel').style.display = 'block';
+        document.getElementById('log-panel').style.display = 'flex';
         document.getElementById('result-panel').style.display = 'none';
         document.getElementById('log-output').innerHTML = '';
+        // Hidden by default; a solve re-activates it via _resetSolveWidget().
+        document.getElementById('solve-widget')?.classList.remove('active');
     }
 
     _appendLog(line) {
@@ -1099,6 +1106,19 @@ class CFDApp {
 
         document.getElementById('cb-title').textContent = info.label;
         document.getElementById('cb-unit').textContent  = info.unit;
+
+        // Match the legend gradient to the field's colormap: vorticity uses the
+        // diverging coolwarm (blue→white→red, top=high) to mirror the mesh; all
+        // other fields keep jet. (Top = max, matching the tick order below.)
+        const bar = document.querySelector('.cb-bar');
+        if (bar) {
+            const JET = 'linear-gradient(to bottom, rgb(128,0,0) 0%, rgb(255,0,0) 12.5%, ' +
+                'rgb(255,200,0) 37.5%, rgb(0,255,128) 50%, rgb(0,255,255) 62.5%, ' +
+                'rgb(0,100,255) 75%, rgb(0,0,255) 87.5%, rgb(0,0,128) 100%)';
+            const COOLWARM = 'linear-gradient(to bottom, rgb(181,5,38) 0%, rgb(230,145,90) 25%, ' +
+                'rgb(242,242,242) 50%, rgb(120,160,235) 75%, rgb(59,76,192) 100%)';
+            bar.style.background = fieldName === 'vorticity' ? COOLWARM : JET;
+        }
 
         const tickEls = document.getElementById('cb-ticks').children;
 
@@ -1385,44 +1405,161 @@ class CFDApp {
     _parseSolveLog(line) {
         const prog = document.getElementById('statusbar-progress');
 
-        // "Time = 45" or "Time = 0.5"
-        const timeM = line.match(/^Time = ([\d.e+-]+)/);
-        if (timeM) {
-            this._sp_time = parseFloat(timeM[1]);
-        }
+        // Phase from "=== marker ===" lines
+        const phaseM = line.match(/^=== (.+?) ===/);
+        if (phaseM) this._setSolvePhase(phaseM[1]);
+
+        // "Time = 45" or "Time = 0.5"  (transient: sim-time; steady: iteration)
+        const timeM = line.match(/^Time = ([\d.eE+-]+)/);
+        if (timeM) this._sp_time = parseFloat(timeM[1]);
 
         // "ExecutionTime = 1.23 s  ClockTime = 3 s"
         const execM = line.match(/ExecutionTime = ([\d.]+) s\s+ClockTime = ([\d.]+) s/);
-        if (execM) {
-            this._sp_exec = parseFloat(execM[1]);
+        if (execM) this._sp_exec = parseFloat(execM[1]);
+
+        // Live forceCoeffs stdout: "    Cd:\t0.1806 ..." / "    Cl:\t-0.90 ..."
+        const NUM = '(-?\\d[\\d.]*(?:[eE][-+]?\\d+)?)';
+        const cdM = line.match(new RegExp('^\\s*Cd:\\s+' + NUM));
+        if (cdM) this._sp_cd = parseFloat(cdM[1]);
+        const clM = line.match(new RegExp('^\\s*Cl:\\s+' + NUM));
+        if (clM) {
+            this._sp_cl = parseFloat(clM[1]);
+            if (this._sp_time != null && isFinite(this._sp_cl)) {
+                (this._sp_clSeries || (this._sp_clSeries = [])).push([this._sp_time, this._sp_cl]);
+                if (this._sp_clSeries.length > 4000) this._sp_clSeries.shift();
+            }
         }
 
-        // "[N/N] Force coefficients: {...}"
-        const forceM = line.match(/\[(\d+)\/(\d+)\] Force coefficients:.*?'Cd':\s*([\d.e+-]+).*?'Cl':\s*([\d.e+-]+)/);
+        // Harness end line: "[N/N] Force coefficients: {... 'Cd': x 'Cl': y}"
+        const forceM = line.match(/\[(\d+)\/(\d+)\] Force coefficients:.*?'Cd':\s*(-?[\d.eE+-]+).*?'Cl':\s*(-?[\d.eE+-]+)/);
         if (forceM) {
-            this._sp_iter = parseInt(forceM[1]);
-            this._sp_imax = parseInt(forceM[2]);
-            this._sp_cd   = parseFloat(forceM[3]);
-            this._sp_cl   = parseFloat(forceM[4]);
+            this._sp_iter = parseInt(forceM[1]); this._sp_imax = parseInt(forceM[2]);
+            this._sp_cd   = parseFloat(forceM[3]); this._sp_cl = parseFloat(forceM[4]);
         }
-
-        // "SIMPLE solution converged in N iterations"
         const convM = line.match(/converged in (\d+) iterations/);
-        if (convM) {
-            this._sp_iter = parseInt(convM[1]);
-        }
+        if (convM) this._sp_iter = parseInt(convM[1]);
 
-        // Build progress string
+        // Divergence: physical Cd/Cl are O(1); |value| > 1e4 means blow-up.
+        if ((this._sp_cd != null && Math.abs(this._sp_cd) > 1e4) ||
+            (this._sp_cl != null && Math.abs(this._sp_cl) > 1e4)) this._sp_diverged = true;
+
+        // Status-bar text (unchanged behaviour, now divergence-safe formatting)
         const parts = [];
         if (this._sp_iter != null) parts.push(`Iter ${this._sp_iter}${this._sp_imax ? '/'+this._sp_imax : ''}`);
-        if (this._sp_cd   != null) parts.push(`cD ${this._sp_cd.toFixed(4)}`);
-        if (this._sp_cl   != null) parts.push(`cL ${this._sp_cl.toFixed(4)}`);
+        if (this._sp_cd   != null) parts.push(`cD ${this._fmtCoeff(this._sp_cd)}`);
+        if (this._sp_cl   != null) parts.push(`cL ${this._fmtCoeff(this._sp_cl)}`);
         if (this._sp_exec != null) parts.push(`t ${this._sp_exec.toFixed(1)}s`);
+        if (parts.length) { prog.style.display = ''; prog.textContent = parts.join('  ·  '); }
 
-        if (parts.length) {
-            prog.style.display = '';
-            prog.textContent = parts.join('  ·  ');
+        this._updateSolveWidget();
+    }
+
+    _setSolvePhase(raw) {
+        const r = raw.toLowerCase();
+        if (/solver_rc/.test(r)) return;                      // internal marker
+        let label = raw;
+        if (/gmsh|renumber|decompose|^mesh/.test(r))          label = 'Meshing';
+        else if (/potentialfoam/.test(r))                     label = 'Init flow';
+        else if (/starting (solver|simplefoam)|^simplefoam/.test(r)) label = 'Solving';
+        else if (/reconstruct/.test(r))                       label = 'Reconstruct';
+        else if (/post-process|post-processing/.test(r))      label = 'Post-processing';
+        else if (/done/.test(r))                              label = 'Done';
+        this._sp_phase = label;
+    }
+
+    _resetSolveWidget(endTime) {
+        this._sp_time = this._sp_exec = this._sp_iter = this._sp_imax = null;
+        this._sp_cd = this._sp_cl = null;
+        this._sp_endTime  = endTime || null;
+        this._sp_phase    = 'Starting';
+        this._sp_diverged = false;
+        this._sp_clSeries = [];
+        this._sp_startWall = Date.now();
+        const w = document.getElementById('solve-widget');
+        if (w) w.classList.add('active');
+        for (const id of ['sw-cd', 'sw-cl', 'sw-time']) {
+            const el = document.getElementById(id);
+            if (el) { el.textContent = '—'; el.classList.remove('diverge'); }
         }
+        const eta = document.getElementById('sw-eta'); if (eta) eta.textContent = '';
+        const ph  = document.getElementById('sw-phase');
+        if (ph) { ph.textContent = 'Starting'; ph.classList.remove('diverge'); }
+        const fill = document.getElementById('sw-bar-fill');
+        if (fill) { fill.style.width = '0%'; fill.classList.remove('diverge'); }
+        this._drawClSparkline();
+    }
+
+    _updateSolveWidget() {
+        const w = document.getElementById('solve-widget');
+        if (!w || !w.classList.contains('active')) return;
+        const $ = id => document.getElementById(id);
+
+        const ph = $('sw-phase');
+        ph.textContent = this._sp_diverged ? '⚠ Diverging' : (this._sp_phase || '—');
+        ph.classList.toggle('diverge', !!this._sp_diverged);
+
+        const cd = $('sw-cd'), cl = $('sw-cl');
+        if (this._sp_cd != null) cd.textContent = this._fmtCoeff(this._sp_cd);
+        if (this._sp_cl != null) cl.textContent = this._fmtCoeff(this._sp_cl);
+        cd.classList.toggle('diverge', this._sp_cd != null && Math.abs(this._sp_cd) > 1e4);
+        cl.classList.toggle('diverge', this._sp_cl != null && Math.abs(this._sp_cl) > 1e4);
+
+        if (this._sp_time != null) $('sw-time').textContent = this._sp_time.toFixed(2) + ' s';
+
+        const fill = $('sw-bar-fill');
+        fill.classList.toggle('diverge', !!this._sp_diverged);
+        if (this._sp_endTime && this._sp_time != null) {
+            const frac = Math.max(0, Math.min(1, this._sp_time / this._sp_endTime));
+            fill.style.width = (frac * 100).toFixed(1) + '%';
+            const elapsed = (Date.now() - this._sp_startWall) / 1000;
+            if (frac >= 1)          $('sw-eta').textContent = `100%  ·  ${this._fmtDur(elapsed)}`;
+            else if (frac > 0.02)   $('sw-eta').textContent = `${(frac*100).toFixed(0)}%  ·  ETA ${this._fmtDur(elapsed*(1-frac)/frac)}`;
+        } else if (this._sp_iter != null) {
+            $('sw-eta').textContent = `Iter ${this._sp_iter}${this._sp_imax ? '/'+this._sp_imax : ''}`;
+        }
+
+        this._drawClSparkline();
+    }
+
+    _drawClSparkline() {
+        const c = document.getElementById('sw-cl-canvas');
+        if (!c) return;
+        const ctx = c.getContext('2d');
+        const w = c.clientWidth || c.width, h = c.clientHeight || c.height;
+        if (c.width  !== w) c.width  = w;
+        if (c.height !== h) c.height = h;
+        ctx.clearRect(0, 0, w, h);
+        const s = this._sp_clSeries || [];
+        // Ignore the absurd t=0 startup spike so the axis stays readable.
+        const pts = s.filter(p => isFinite(p[1]) && Math.abs(p[1]) < 1e4);
+        if (pts.length < 2) return;
+        const vals = pts.map(p => p[1]);
+        let mn = Math.min(...vals), mx = Math.max(...vals);
+        if (mx - mn < 1e-6) { mn -= 0.5; mx += 0.5; }
+        const pad = (mx - mn) * 0.12; mn -= pad; mx += pad;
+        const t0 = pts[0][0], t1 = pts[pts.length - 1][0];
+        const xOf = t => (t1 > t0 ? (t - t0) / (t1 - t0) : 0) * (w - 2) + 1;
+        const yOf = v => h - 3 - ((v - mn) / (mx - mn)) * (h - 6);
+        if (mn < 0 && mx > 0) {
+            ctx.strokeStyle = 'rgba(106,122,142,0.35)'; ctx.lineWidth = 1;
+            ctx.beginPath(); ctx.moveTo(1, yOf(0)); ctx.lineTo(w - 1, yOf(0)); ctx.stroke();
+        }
+        ctx.strokeStyle = this._sp_diverged ? '#ff6b6b' : '#3d9eff';
+        ctx.lineWidth = 1.4; ctx.lineJoin = 'round';
+        ctx.beginPath();
+        pts.forEach(([t, v], i) => { const x = xOf(t), y = yOf(v); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+        ctx.stroke();
+    }
+
+    _fmtCoeff(v) {
+        if (v == null || !isFinite(v)) return '—';
+        const a = Math.abs(v);
+        return (a >= 1e4 || (a > 0 && a < 1e-3)) ? v.toExponential(1) : v.toFixed(3);
+    }
+
+    _fmtDur(s) {
+        s = Math.max(0, Math.round(s));
+        return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m${String(s % 60).padStart(2, '0')}s`;
     }
 
     _clearSolveProgress() {

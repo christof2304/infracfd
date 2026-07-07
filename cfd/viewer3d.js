@@ -392,7 +392,16 @@ export class Viewer3D {
         const sortedV = [...finite].sort((a, b) => a - b);
         const p05 = sortedV[Math.floor(sortedV.length * 0.05)] ?? 0;
         const p95 = sortedV[Math.floor(sortedV.length * 0.95)] ?? 1;
-        const vmin = p05, vmax = p95;
+        // Signed fields (vorticity) get a symmetric range so 0 maps to the
+        // diverging colormap's neutral centre (white); others use the raw p05–p95.
+        const cmap = cmapFor(fieldName);
+        let vmin, vmax;
+        if (cmap === coolwarmColor) {
+            const A = Math.max(Math.abs(p05), Math.abs(p95), 1e-9);
+            vmin = -A; vmax = A;
+        } else {
+            vmin = p05; vmax = p95;
+        }
         const range = Math.max(vmax - vmin, 1e-9);
 
         // ── Build geometry (smooth per-node coloring) ────────────────
@@ -417,7 +426,7 @@ export class Viewer3D {
             }
         }
         const color = this._smoothNodeColors(
-            tris, validIdxs.map(i => triVals[i]), nNodes, vmin, range);
+            tris, validIdxs.map(i => triVals[i]), nNodes, vmin, range, cmap);
 
         const geom = new THREE.BufferGeometry();
         geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
@@ -430,10 +439,10 @@ export class Viewer3D {
         this._cfdGroup.add(mesh);
 
         this._cfdAnimMesh = mesh;
-        this._cfdAnimMeta = { validIdxs, tris, nNodes, vmin: p05, vmax: p95, range };
+        this._cfdAnimMeta = { validIdxs, tris, nNodes, vmin, vmax, range, cmap };
 
         this._initOrthoMode();
-        return { vmin: p05, vmax: p95 };
+        return { vmin, vmax };
     }
 
     // Interpolate per-triangle (cell) values to nodes and return a non-indexed
@@ -442,7 +451,7 @@ export class Viewer3D {
     // of tris[k]. Each node value is the mean of the values of the triangles
     // meeting at it — computed over exactly the rendered set, so every node in
     // `tris` is touched at least once (no zero-count / black-vertex artifacts).
-    _smoothNodeColors(tris, valsPerTri, nNodes, vmin, range) {
+    _smoothNodeColors(tris, valsPerTri, nNodes, vmin, range, cmap = jetColor) {
         const sum = new Float64Array(nNodes);
         const cnt = new Float64Array(nNodes);
         for (let k = 0; k < tris.length; k++) {
@@ -459,7 +468,7 @@ export class Viewer3D {
                 const idx = tri[j];
                 const nv = cnt[idx] ? sum[idx] / cnt[idx] : valsPerTri[k];
                 const t = Math.max(0, Math.min(1, (nv - vmin) / range));
-                const [r, g, b] = jetColor(t);
+                const [r, g, b] = cmap(t);
                 color[vi] = r; color[vi+1] = g; color[vi+2] = b;
                 vi += 3;
             }
@@ -475,11 +484,11 @@ export class Viewer3D {
     computeAnimColors(timestepData, vmin, vmax) {
         const meta = this._cfdAnimMeta;
         if (!meta) return null;
-        const { validIdxs, tris, nNodes, range } = meta;
+        const { validIdxs, tris, nNodes, range, cmap } = meta;
         const field = timestepData.field ?? timestepData;
         if (!field?.triangles) return null;
         const valsPerTri = validIdxs.map(rawIdx => field.triangles[rawIdx]?.p ?? vmin);
-        return this._smoothNodeColors(tris, valsPerTri, nNodes, vmin, range);
+        return this._smoothNodeColors(tris, valsPerTri, nNodes, vmin, range, cmap ?? jetColor);
     }
 
     // Instantly apply a pre-computed color array to the CFD mesh (no geometry rebuild).
@@ -1575,6 +1584,22 @@ function jetColor(t) {
     const g = Math.max(0, Math.min(1, 1.5 - Math.abs(4 * t - 2)));
     const b = Math.max(0, Math.min(1, 1.5 - Math.abs(4 * t - 1)));
     return [r, g, b];
+}
+
+// ── Coolwarm diverging colormap (blue → white → red) ──────────────
+// For signed fields (vorticity): t=0.5 → white, so a symmetric value range
+// puts zero at the neutral centre and the two vortex rotation senses read as
+// clean blue vs red — the CFD-standard look for the Kármán street.
+function coolwarmColor(t) {
+    t = Math.max(0, Math.min(1, t));
+    const blue = [0.23, 0.30, 0.75], white = [0.95, 0.95, 0.95], red = [0.71, 0.02, 0.15];
+    const mix = (a, b, s) => [a[0] + (b[0] - a[0]) * s, a[1] + (b[1] - a[1]) * s, a[2] + (b[2] - a[2]) * s];
+    return t < 0.5 ? mix(blue, white, t / 0.5) : mix(white, red, (t - 0.5) / 0.5);
+}
+
+// Colormap per field: vorticity is signed → diverging; everything else → jet.
+function cmapFor(fieldName) {
+    return fieldName === 'vorticity' ? coolwarmColor : jetColor;
 }
 
 // ── Data normalisation helpers ────────────────────────────────────

@@ -219,18 +219,58 @@ body { font-family: var(--font-ui); font-size: 13px; color: var(--text); backgro
 
 /* Log + result panels (overlay over canvas) */
 #log-panel {
-    display: none;
+    display: none;            /* toggled to flex when a solve starts */
+    flex-direction: column;
     position: absolute;
     bottom: 0;
     left: 0;
     right: 0;
-    height: 180px;
+    height: 250px;
     background: rgba(10,12,18,0.92);
     border-top: 1px solid var(--border-hi);
 }
+/* ── live solve widget ── */
+#solve-widget {
+    display: none;           /* shown only for a running solve (JS) */
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px 12px 8px;
+    border-bottom: 1px solid var(--border);
+}
+#solve-widget.active { display: flex; }
+.sw-head { display: flex; align-items: center; gap: 10px; }
+.sw-phase {
+    font: 600 10px/1 var(--font-mono);
+    letter-spacing: .05em;
+    text-transform: uppercase;
+    color: var(--accent);
+    background: var(--accent-dim);
+    border: 1px solid var(--accent-dim2);
+    padding: 3px 7px;
+    border-radius: 4px;
+    white-space: nowrap;
+}
+.sw-phase.diverge { color: #ff6b6b; background: rgba(255,92,92,.12); border-color: rgba(255,92,92,.35); }
+.sw-bar { flex: 1; height: 6px; background: var(--bg-input); border-radius: 3px; overflow: hidden; }
+#sw-bar-fill { width: 0%; height: 100%; background: var(--accent); transition: width .3s ease; }
+#sw-bar-fill.diverge { background: #ff6b6b; }
+.sw-eta { font: 500 10px/1 var(--font-mono); color: var(--text-dim); white-space: nowrap; min-width: 92px; text-align: right; }
+.sw-body { display: flex; align-items: stretch; gap: 12px; }
+.sw-tiles { display: flex; gap: 8px; }
+.sw-tile {
+    display: flex; flex-direction: column; gap: 3px;
+    min-width: 66px; padding: 5px 8px;
+    background: var(--bg-input); border: 1px solid var(--border); border-radius: 5px;
+}
+.sw-tl { font: 500 8px/1 var(--font-mono); letter-spacing: .08em; text-transform: uppercase; color: var(--text-dim); }
+.sw-tv { font: 600 14px/1 var(--font-mono); color: var(--text-mono); }
+.sw-tv.diverge { color: #ff6b6b; }
+.sw-spark { flex: 1; display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+#sw-cl-canvas { width: 100%; height: 46px; background: var(--bg-input); border: 1px solid var(--border); border-radius: 5px; }
 #log-output {
+    flex: 1;
+    min-height: 0;
     width: 100%;
-    height: 100%;
     background: none;
     border: none;
     color: #5a8a5a;
@@ -241,6 +281,7 @@ body { font-family: var(--font-ui); font-size: 13px; color: var(--text); backgro
     resize: none;
     outline: none;
     white-space: pre;
+    margin: 0;
 }
 
 #result-panel {
@@ -728,6 +769,24 @@ select.p-input option { background: var(--bg-panel); }
 
     <!-- Log overlay -->
     <div id="log-panel">
+        <div id="solve-widget">
+            <div class="sw-head">
+                <span id="sw-phase" class="sw-phase">Starting</span>
+                <div class="sw-bar"><div id="sw-bar-fill"></div></div>
+                <span id="sw-eta" class="sw-eta"></span>
+            </div>
+            <div class="sw-body">
+                <div class="sw-tiles">
+                    <div class="sw-tile"><span class="sw-tl">Cd</span><span id="sw-cd" class="sw-tv">—</span></div>
+                    <div class="sw-tile"><span class="sw-tl">Cl</span><span id="sw-cl" class="sw-tv">—</span></div>
+                    <div class="sw-tile"><span class="sw-tl">sim&nbsp;time</span><span id="sw-time" class="sw-tv">—</span></div>
+                </div>
+                <div class="sw-spark">
+                    <span class="sw-tl">Cl(t) — vortex shedding</span>
+                    <canvas id="sw-cl-canvas" width="480" height="46"></canvas>
+                </div>
+            </div>
+        </div>
         <pre id="log-output"></pre>
     </div>
 
@@ -761,7 +820,7 @@ select.p-input option { background: var(--bg-panel); }
         <div class="p-section">
             <div class="p-label">Mesh</div>
             <label style="font-size:11px;color:var(--text-dim);display:block;margin-bottom:3px">Computational domain: <span id="domain-val" style="color:var(--text-mono)">15×</span></label>
-            <input type="range" id="domain-size" class="p-slider" min="8" max="30" value="15" step="1"
+            <input type="range" id="domain-size" class="p-slider" min="5" max="30" value="15" step="1"
                 oninput="document.getElementById('domain-val').textContent=this.value+'×'">
             <div class="p-slider-row"><span>small</span><span>large</span></div>
 
@@ -1037,6 +1096,6 @@ select.p-input option { background: var(--bg-panel); }
     }
 }
 </script>
-<script type="module" src="./app.js"></script>
+<script type="module" src="./app.js?v=20260707e"></script>
 </body>
 </html>
